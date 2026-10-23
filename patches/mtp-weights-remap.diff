@@ -1,0 +1,25 @@
+--- mtp.py.bak-debug	2026-10-23 13:30:58.401383210 +0000
++++ mtp.py	2026-10-23 13:58:10.854498666 +0000
+@@ -109,7 +109,21 @@
+     if name.startswith("model.lm_head."):
+         return name.removeprefix("model.")
+     if name.startswith("mtp."):
+-        return name.replace("mtp.", "model.", 1)
++        name = name.replace("mtp.", "model.", 1)
++        # QSA cache scales (leoncca AWQ-g32 layout): AutoWeightsLoader applies
++        # quant_config.get_cache_scale_mapper() which rewrites 'X.k_scale' into
++        # 'X.attn.k_scale' (stock attention layout). QSAAttention has no 'attn'
++        # child and the draft path never runs _remap_qsa_cache_scale_name, so
++        # move them straight onto the owner buffers (_k_scale/_v_scale) and
++        # drop q_scale (input scales are never cached; no buffer exists).
++        if name.endswith(".self_attn.q_scale"):
++            return None
++        for _s in ("k_scale", "v_scale"):
++            if name.endswith(f".self_attn.{_s}") or name.endswith(
++                f".self_attn._{_s}"
++            ):
++                return f"{name[: name.rfind('.')]}._{_s}"
++        return name
+     if name.startswith("model.embed_tokens.") or name.startswith("lm_head."):
+         return name
+     return None

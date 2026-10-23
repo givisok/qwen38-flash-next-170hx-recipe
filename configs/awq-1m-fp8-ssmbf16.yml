@@ -1,0 +1,121 @@
+# Qwen3.8-Flash-Next UNCENSORED — leoncca AWQ-g32 (experts int4 g32 + FP8 PLE)
+# on vllm-sm80 (SM80 PP3). Same Qwen4Exp 180B-A6B skeleton as the Intel
+# AutoRound build; PLE table (51 GB fp8) stays NVMe-streamed via preadv.
+# 1M context via YaRN x4 + the layer_types bridge (same as the dense config).
+#
+# Taken from mannydelrio/2x170hx: explicit cudagraph capture sizes — vLLM
+# rounds the MTP decode batch to multiples of (1+3 draft)=4, so graphs must
+# cover 16 seqs x 4 = 64 tokens or the tail runs graphless.
+model: /models/qwen38fn-awq-g32
+served-model-name: qwen3.8
+host: 0.0.0.0
+port: 8000
+
+# parallelism (no P2P on this box: TP is off the table; PP carries it)
+distributed-executor-backend: mp
+tensor-parallel-size: 1
+pipeline-parallel-size: 3
+disable-custom-all-reduce: true
+
+# serving geometry
+dtype: bfloat16
+max-model-len: 1048576
+block-size: 1728
+max-num-seqs: 16
+max-num-batched-tokens: 8192
+gpu-memory-utilization: 0.94
+kv-cache-dtype: fp8_e4m3
+enable-prefix-caching: true
+enable-chunked-prefill: true
+mamba-cache-mode: align
+async-scheduling: true
+
+# Disk KV tier (persistent prefix cache): CPU primary gateway +
+# NVMe fs secondary. NOTE: kv-disk must be wiped when swapping model
+# checkpoints — entries are content-addressed by tokens, not by weights.
+# ABLATION: tiering disabled for KV-corruption bisect
+# compilation: full decode graphs + piecewise prefill capture;
+# sizes on 4-token lattice to cover 16 seqs under MTP rounding
+compilation-config:
+  cudagraph_mode: FULL_AND_PIECEWISE
+  cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64]
+enable-flashinfer-autotune: false
+
+# spec decode: inline MTP (checkpoint ships the draft in model_extra_tensors)
+speculative-config:
+  method: mtp
+  num_speculative_tokens: 3
+
+# templates & parsers (model's own chat template mounted at /opt)
+chat-template: /opt/chat_template.jinja
+trust-request-chat-template: true
+enable-auto-tool-choice: true
+tool-call-parser: qwen3_xml
+reasoning-parser: qwen3
+enable-prompt-tokens-details: true
+default-chat-template-kwargs:
+  enable_thinking: true
+  preserve_thinking: true
+  reasoning_effort: xhigh
+
+# RoPE/context extension + layer_type bridge
+hf-overrides:
+  text_config:
+    layer_types:
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+      - linear_attention
+      - linear_attention
+      - linear_attention
+      - qwen_sparse_attention
+    rope_parameters:
+      rope_type: yarn
+      factor: 4.0
+      original_max_position_embeddings: 262144
+      rope_theta: 10000000
+      partial_rotary_factor: 0.25
+      mrope_interleaved: true
+      mrope_section: [11, 11, 10]
+mamba-ssm-cache-dtype: bfloat16

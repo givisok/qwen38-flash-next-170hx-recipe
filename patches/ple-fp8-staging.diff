@@ -1,0 +1,43 @@
+--- ngram_embedding.py.bak-fp8	2026-10-23 14:05:54.026172001 +0000
++++ ngram_embedding.py	2026-10-23 14:05:54.050778517 +0000
+@@ -366,6 +366,11 @@
+             out = staging[: n * h].view(self._ple_staged_dtype).view(
+                 n, h * self.head_dim
+             )
++            if getattr(self, "_ple_staged_dequant", False):
++                # fp8 PLE tables: staged rows are e4m3; the consumer runs in
++                # the model dtype. A view cannot change dtype, so dequantize
++                # with an elementwise cast (kernel is cudagraph-capturable).
++                out = out.to(torch.bfloat16)
+             if os.environ.get("VLLM_PLE_DEBUG", "0") == "1":
+                 from ..common.ngram_embedding import _ple_log
+                 _ple_log("fwd-read", out.detach().cpu())
+@@ -379,15 +384,24 @@
+     # --- src302/tonyd2wild: staged gather (host side, before the forward) ---
+     def _ple_init_staging(self, max_num_tokens: int, device: torch.device) -> None:
+         rows = int(max_num_tokens) * int(self.ngram_heads)
++        # Staging holds RAW table rows: bf16 PLE tables are 2 bytes/element,
++        # fp8-e4m3 PLE tables (leoncca AWQ-g32 layout) are 1 byte/element.
++        # The buffer is uint8; the forward views it as the table dtype and
++        # dequantizes to bf16 when needed (graph-safe kernel, not a view).
++        wdtype = self.ngram_embedding.weight.dtype
++        elem_size = torch.tensor([], dtype=wdtype).element_size()
+         self._ple_staged_buffer = torch.zeros(
+-            (rows, self.head_dim * 2),
++            (rows, self.head_dim * elem_size),
+             dtype=torch.uint8,
+             device=device,
+         )
+-        self._ple_staged_dtype = torch.bfloat16
++        self._ple_staged_dtype = wdtype
++        self._ple_staged_dequant = wdtype != torch.bfloat16
+         logger.info(
+-            "PLE staged gather: staging %d tokens x %d heads = %d rows on %s",
+-            int(max_num_tokens), int(self.ngram_heads), rows, device,
++            "PLE staged gather: staging %d tokens x %d heads = %d rows "
++            "(row dtype %s, %d B/row) on %s",
++            int(max_num_tokens), int(self.ngram_heads), rows, wdtype,
++            self.head_dim * elem_size, device,
+         )
+ 
+     def _ple_stage_zero(self, num_tokens: int) -> None:
