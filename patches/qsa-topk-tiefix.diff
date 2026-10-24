@@ -1,0 +1,122 @@
+# QSA canonical top-k tie fix — ported from Morrowmake/vllm-cmp170hx (ampere)
+# Kernel file vllm/models/qwen4_exp/nvidia/ops/qsa_topk_tiefix.py is a VERBATIM
+# copy of vllm/sm80/kernels/indexer/topk_tiefix.py @ branch ampere
+# (md5 fe73df4449a0778904a77b6b3c878d64). This diff is the integration only:
+# env gate + two hooks (decode / prefill-chunk) in ops/qsa_indexer.py.
+#
+# Activation (run-qwen38fn.sh): -e VLLM_QWEN4_QSA_TOPK_CANONICAL=1
+#                               -e VLLM_QWEN_QSA_TOPK_SORTED=1
+# Rollback: QSA_CANONICAL=0 QSA_SORTED=0 ./switch-to-awq.sh (no rebuild).
+#
+# Validation 2026-10-24 (CT101, 3x CMP 170HX):
+#   - GPU unit test vs independent stable-sort oracle: ALL PASS
+#     (canonical set / sorted rows / byte-identity uncontested / idempotence /
+#      32768-col rows / empty-short-full windows)
+#   - defect reproduced on stock persistent_topk: 8/8 rows varied their
+#     selected block set across 30 identical calls (tie-heavy scores)
+#   - speed A/B same-day: ON median 113.0 vs OFF 106.3 tok/s single,
+#     N=16 per-req 45.2 (baseline 45.0) — no regression (sorted indices
+#     improve KV read locality)
+#   - residual temp=0 nondeterminism (coherent rewordings only) remains and
+#     is NOT the QSA tie defect: other sources (MoE alignment, MTP verify,
+#     batch-shape FP accumulation) — Morrowmake's determinism family for
+#     those lives in their fork's kernels and is not ported.
+diff --git a/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py b/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
+index 9b28ed6dca..6c961871c5 100644
+--- a/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
++++ b/vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
+@@ -2,6 +2,9 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Triton kernels for Qwen4Exp QSA index selection."""
+ 
++import functools
++import os
++
+ import torch
+ 
+ import vllm.envs as envs
+@@ -10,10 +13,64 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+ )
+ from vllm.platforms import current_platform
+ from vllm.triton_utils import tl, triton
++from vllm.logger import init_logger
+ 
+ _TOPK_WORKSPACE_BYTES = 1024 * 1024
+ _DECODE_BLOCK_N = 64
+ 
++# --- QSA canonical top-k tie fix (ported from Morrowmake/vllm-cmp170hx) ---
++# The stock top-k kernels (persistent_topk / cooperative_topk) place entries
++# tied with the k-th score by atomic arrival order, so on exact score ties the
++# selected SET is a function of batch shape and timing, not of the scores.
++# VLLM_QWEN4_QSA_TOPK_CANONICAL=1 repairs the contested boundary in place:
++# tied entries go to the lowest block indices. VLLM_QWEN_QSA_TOPK_SORTED=1
++# additionally sorts each row ascending (-1 fill last) inside the same launch,
++# so both the set and the traversal order are functions of the scores alone.
++# Both switches are read once at import: never in the hot path, and before
++# any CUDA graph capture (see ops/qsa_topk_tiefix.py).
++_QSA_TOPK_CANONICAL = os.environ.get("VLLM_QWEN4_QSA_TOPK_CANONICAL", "0") == "1"
++_QSA_TOPK_SORTED = os.environ.get("VLLM_QWEN_QSA_TOPK_SORTED", "0") == "1"
++if _QSA_TOPK_SORTED and not _QSA_TOPK_CANONICAL:
++    raise ValueError(
++        "VLLM_QWEN_QSA_TOPK_SORTED=1 needs VLLM_QWEN4_QSA_TOPK_CANONICAL=1: "
++        "the sort runs inside the tie-fix launch"
++    )
++if _QSA_TOPK_CANONICAL:
++    init_logger(__name__).info_once(
++        "Qwen QSA canonical top-k active: boundary ties go to the lowest "
++        "block indices%s (VLLM_QWEN4_QSA_TOPK_CANONICAL=1)"
++        % (", rows sorted ascending" if _QSA_TOPK_SORTED else "")
++    )
++
++
++@functools.cache
++def _qsa_topk_tiefix():
++    # Import + warm on first use: the first indexer forward runs eagerly
++    # (before any CUDA graph capture), so every Triton variant compiles there.
++    from vllm.models.qwen4_exp.nvidia.ops.qsa_topk_tiefix import (
++        topk_tiefix_,
++        warm_tiefix,
++    )
++
++    warm_tiefix()
++    return topk_tiefix_
++
++
++def _canonical_qsa_topk_(
++    logits: torch.Tensor,
++    block_indices: torch.Tensor,
++    visible_blocks: torch.Tensor,
++) -> None:
++    if not _QSA_TOPK_CANONICAL:
++        return
++    _qsa_topk_tiefix()(
++        logits,
++        block_indices,
++        row_ends=visible_blocks,
++        sort=_QSA_TOPK_SORTED,
++    )
++
++
+ 
+ @triton.jit
+ def _qsa_mqa_paged_uniform_kernel(
+@@ -573,6 +630,7 @@ def qsa_select_paged_decode(
+         block_indices,
+         torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
+     )
++    _canonical_qsa_topk_(logits, block_indices, visible_blocks)
+ 
+ 
+ def qsa_select_paged_prefill(
+@@ -649,6 +707,11 @@ def qsa_select_paged_prefill(
+             block_indices[query_slice],
+             topk_workspace,
+         )
++        _canonical_qsa_topk_(
++            logits,
++            block_indices[query_slice],
++            visible_blocks[query_slice],
++        )
+ 
+ 
+ __all__ = [

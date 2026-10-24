@@ -1,6 +1,6 @@
 # Fork patches required for leoncca AWQ-g32 checkpoint (2026-10-23)
 
-Two patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
+Three patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
 
 1. mtp.py — `_remap_mtp_weight_name`: the AWQ-g32 checkpoint ships QSA cache
    scales (`mtp.layers.0.self_attn.{q,k,v}_scale`). AutoWeightsLoader applies
@@ -15,6 +15,9 @@ Two patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
    warmup. Fix: size rows by the table dtype (weight.dtype), view as the
    table dtype and dequantize fp8→bf16 in the staged forward branch
    (elementwise cast, cudagraph-capturable).
+3. ops/qsa_indexer.py + ops/qsa_topk_tiefix.py — canonical QSA top-k tie fix,
+   ported 2026-10-24 from Morrowmake/vllm-cmp170hx (ampere), see the section
+   below and `qsa-topk-tiefix.diff`.
 
 Backups next to sources: *.bak-debug (pre-patch), ngram_embedding.py.bak-fp8.
 
@@ -46,3 +49,35 @@ TO RE-ENABLE TIERING LATER: restore .bak-tiering config block AND fix the bug
 first — candidate defects: lookup-HIT vs async-load vs eviction race in
 fs/manager.py (_account_stored/_touch_loaded), chunk offset math in submit_store,
 or the spec-decode draft-group exclusion in tiering/spec.py.
+
+## QSA top-k tie fix — ported from Morrowmake/vllm-cmp170hx (2026-10-24)
+
+DEFECT: the stock top-k (`persistent_topk` / `cooperative_topk`) places entries
+tied with the k-th score by ATOMIC ARRIVAL ORDER, so on exact score ties the
+selected block SET is a function of batch shape and timing, not of the scores.
+Reproduced on our GPUs (`patches/qsa-tiefix-gpu-test.py`): 8/8 rows selected
+different block sets across 30 identical calls on tie-heavy scores. In serving
+this silently changes which context blocks the model attends to.
+
+FIX (upstream author: Morrowmake; file copied verbatim, md5
+fe73df4449a0778904a77b6b3c878d64): `ops/qsa_topk_tiefix.py` — one Triton pass
+per row that repairs only contested boundaries (tied entries go to the lowest
+block indices), optionally sorting each row ascending (-1 last) in the same
+launch. Integration: env gate + hooks after the decode and prefill-chunk
+`_topk` in `ops/qsa_indexer.py` (fork commit 2d32a63922). K=512 absolute for
+this model (indexer_budget 2048 / compress_ratio 4); reads env once at import,
+before CUDA graph capture; cudagraph-safe (no host reads).
+
+KNOBS (run-qwen38fn.sh): `QSA_CANONICAL=1` (tie repair), `QSA_SORTED=1`
+(sorted rows, needs CANONICAL). Rollback: `QSA_CANONICAL=0 QSA_SORTED=0
+./switch-to-awq.sh` — no rebuild.
+
+VALIDATION (2026-10-24, CT101): GPU unit test vs independent stable-sort
+oracle ALL PASS (canonical set, sorted rows, byte-identity of uncontested
+rows, idempotence, 32768-col rows, empty/short/full windows). Speed A/B
+same-day: ON median 113.0 vs OFF 106.3 tok/s single (sorted indices improve
+KV read locality — no regression); N=16 per-req 45.2 vs baseline 45.0.
+Residual temp=0 nondeterminism (coherent rewordings only) remains and is NOT
+this defect: other sources (MoE alignment, MTP verify, batch-shape FP
+accumulation) — Morrowmake's determinism family for those lives in their
+fork's kernels and is not ported.

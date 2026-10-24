@@ -42,7 +42,9 @@ verify_rev "$BASE" || exit 1
 PP_PARTITION=${PP_PARTITION:-17,16,15}
 PLE_STAGED=${PLE_STAGED:-1}   # 1 = shard-direct preadv PLE (default; needs no .bin)
 PLE_MMAP=${PLE_MMAP:-0}       # 1 = legacy assembled-.bin mmap path (reference only)
-PLE_ZERO=${PLE_ZERO:-0}       # 1 = ablation: zero the PLE contribution
+PLE_ZERO=${PLE_ZERO:-0}
+QSA_CANONICAL=${QSA_CANONICAL:-1}  # 1 = QSA top-k tie fix (canonical set)
+QSA_SORTED=${QSA_SORTED:-1}    # 1 = also sort selected blocks ascending
 MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-w4a16-autoround}
 
 mkdir -p runs/triton-cache
@@ -70,6 +72,8 @@ exec docker run -d --pull=never --name "$NAME" \
   -v "$D/models/qwen4_exp/nvidia/mtp.py:$V/models/qwen4_exp/nvidia/mtp.py:ro" \
   -v "$D/models/qwen4_exp/nvidia/ops/qsa.py:$V/models/qwen4_exp/nvidia/ops/qsa.py:ro" \
   -v "$D/models/qwen4_exp/nvidia/ops/qsa_prepare.py:$V/models/qwen4_exp/nvidia/ops/qsa_prepare.py:ro" \
+  -v "$D/models/qwen4_exp/nvidia/ops/qsa_indexer.py:$V/models/qwen4_exp/nvidia/ops/qsa_indexer.py:ro" \
+  -v "$D/models/qwen4_exp/nvidia/ops/qsa_topk_tiefix.py:$V/models/qwen4_exp/nvidia/ops/qsa_topk_tiefix.py:ro" \
   -v "$D/v1/worker/gpu/model_runner.py:$V/v1/worker/gpu/model_runner.py:ro" \
   -v "$D/v1/worker/utils.py:$V/v1/worker/utils.py:ro" \
   -v "$D/v1/ple_offload:$V/v1/ple_offload:ro" \
@@ -85,6 +89,7 @@ exec docker run -d --pull=never --name "$NAME" \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e VLLM_PP_LAYER_PARTITION="$PP_PARTITION" \
   -e "VLLM_PLE_MMAP=$PLE_MMAP" -e "VLLM_PLE_STAGED=$PLE_STAGED" -e VLLM_PLE_SYNC=1 \
+  -e "VLLM_QWEN4_QSA_TOPK_CANONICAL=$QSA_CANONICAL" -e "VLLM_QWEN_QSA_TOPK_SORTED=$QSA_SORTED" \
   -v "$PWD/configs/chat_template.jinja:/opt/chat_template.jinja:ro" \
   -e "QWEN4EXP_PLE_MODEL_DIR=/models/$(basename "$MODEL_DIR")" \
   --entrypoint vllm "$IMAGE" \
