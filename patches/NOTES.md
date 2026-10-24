@@ -54,12 +54,13 @@ kv-transfer-config; then 0/32 garbage in an 8-way concurrent battery
 (N=16 per-req 45.0 tok/s vs 44.9 with tiering).
 
 CURRENT STATE: kv-transfer-config removed from configs/awq-1m-fp8-ssmbf16.yml
-(backup with tiering: awq-1m-fp8-ssmbf16.yml.bak-tiering). Lost: persistent warm
+(the tiering block's exact text is preserved above). Lost: persistent warm
 prefix cache across restarts + CPU hot tier. Kept: GPU prefix cache, 4.57M-token
 KV pool, all speeds. VLLM_PLE_SYNC=1 kept (harmless, closes the PLE H2D race).
 
-TO RE-ENABLE TIERING LATER: restore .bak-tiering config block AND fix the bug
-first — candidate defects: lookup-HIT vs async-load vs eviction race in
+TO RE-ENABLE TIERING LATER: re-add the kv-transfer-config block to the config
+(the exact YAML is quoted above) AND fix the bug first — candidate defects:
+lookup-HIT vs async-load vs eviction race in
 fs/manager.py (_account_stored/_touch_loaded), chunk offset math in submit_store,
 or the spec-decode draft-group exclusion in tiering/spec.py.
 
