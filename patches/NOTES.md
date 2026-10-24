@@ -1,6 +1,6 @@
 # Fork patches required for leoncca AWQ-g32 checkpoint (2026-10-23)
 
-Three patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
+Patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
 
 1. mtp.py — `_remap_mtp_weight_name`: the AWQ-g32 checkpoint ships QSA cache
    scales (`mtp.layers.0.self_attn.{q,k,v}_scale`). AutoWeightsLoader applies
@@ -18,6 +18,19 @@ Three patches on top of q38fn/stack (bind-mounted by run-qwen38fn.sh):
 3. ops/qsa_indexer.py + ops/qsa_topk_tiefix.py — canonical QSA top-k tie fix,
    ported 2026-10-24 from Morrowmake/vllm-cmp170hx (ampere), see the section
    below and `qsa-topk-tiefix.diff`.
+4. precision.py + hooks in model.py/mtp.py — Qwen4Exp precision switches,
+   also ported 2026-10-24 from Morrowmake (ampere): `qwen4-precision.diff`,
+   `qwen4_precision.py`. Shipped ON: router logits FP32 (GateLinear cuBLAS
+   bf16→fp32 epilogue tier — fewer exact ties at top-k, matches the bf16
+   reference which casts logits to fp32). Shipped OFF: per-stream MTP hidden
+   norm (A/B: spec-decode acceptance 48.4% vs 51.1% flat — checkpoint's draft
+   calibrated with flat norm). Not ported (already active): padding rows are
+   routed to no expert by our fork's VLLM_MOE_SKIP_PADDING=1 default
+   (envs.py:215) via FusedTopKRouter -> ops.topk_* (is_padding=...), the
+   is_padding mask filled in v1/worker/gpu/model_runner.py. Deferred:
+   deterministic moe_align (their align.py targets the Triton fused-experts
+   stack; our Marlin MoE computes token rows independently, so intra-expert
+   rank order is numerically inert).
 
 Backups next to sources: *.bak-debug (pre-patch), ngram_embedding.py.bak-fp8.
 

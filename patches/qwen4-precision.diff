@@ -1,0 +1,96 @@
+# Qwen4Exp precision switches — ported from Morrowmake/vllm-cmp170hx (ampere)
+# New file vllm/models/qwen4_exp/nvidia/precision.py ships whole (see this
+# repo). This diff is the two hooks: Qwen4ExpSparseMoeBlock.__init__ gains
+# apply_router_precision(self.gate); Qwen4ExpMTP.__init__ builds its
+# pre_fc_norm_hidden via the mtp_hidden_norm factory.
+#
+# Activation (run-qwen38fn.sh):
+#   ROUTER_FP32=1      VLLM_QWEN4_ROUTER_FP32 -> cuBLAS bf16xbf16->fp32 router
+#                      logits (GateLinear tier 5; works on sm80, unlike the
+#                      SM90+ tiers). Fewer exact ties + matches the bf16
+#                      reference which casts router logits to fp32 before topk.
+#   MTP_PER_STREAM=0   VLLM_QWEN4_MTP_PER_STREAM_NORM — per-stream MTP hidden
+#                      norm. OFF: A/B on this checkpoint showed spec-decode
+#                      acceptance 48.4% vs 51.1% base (draft calibrated with
+#                      the flat norm; upstream default OFF too).
+#
+# Already on in this fork (no port needed): VLLM_MOE_SKIP_PADDING=1 (envs.py
+# default) routes CUDA-graph padding rows to no expert via FusedTopKRouter /
+# ops.topk_*(is_padding=...); model_runner fills forward_context.is_padding.
+# moe_align determinism (their align.py): deferred — our Marlin MoE computes
+# each token row independently, so intra-expert rank order is numerically inert
+# (the upstream atomic ordering mattered in their Triton fused-experts stack).
+#
+# A/B 2026-10-24 (same 3-boot suite: determinism battery + 4-way code battery
+# + /metrics): base 51.05% accept / 82.0 tok-per-req; router-fp32 50.42% /
+# 79.6 (within boot noise); per-stream 48.43% -> rejected.
+diff --git a/vllm/models/qwen4_exp/nvidia/model.py b/vllm/models/qwen4_exp/nvidia/model.py
+index 2de883cc47..0ef90cafb3 100644
+--- a/vllm/models/qwen4_exp/nvidia/model.py
++++ b/vllm/models/qwen4_exp/nvidia/model.py
+@@ -158,6 +158,9 @@ _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
+ )
+ 
+ 
++from .precision import apply_router_precision
++
++
+ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
+     """Qwen3Next MoE with Qwen4Exp HC validation."""
+ 
+@@ -170,6 +173,7 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
+         super().__init__(vllm_config=vllm_config, prefix=prefix)
+         config = vllm_config.model_config.hf_text_config
+         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
++        apply_router_precision(self.gate)
+ 
+ 
+ class Qwen4ExpDecoderLayer(nn.Module):
+diff --git a/vllm/models/qwen4_exp/nvidia/mtp.py b/vllm/models/qwen4_exp/nvidia/mtp.py
+index 48c133723a..8d078c9a0e 100644
+--- a/vllm/models/qwen4_exp/nvidia/mtp.py
++++ b/vllm/models/qwen4_exp/nvidia/mtp.py
+@@ -26,6 +26,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
+     is_model_fused_shared_expert_compatible,
+ )
+ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
++
++from .precision import mtp_hidden_norm
+ from vllm.model_executor.layers.linear import ColumnParallelLinear
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+@@ -109,7 +111,21 @@ def _remap_mtp_weight_name(name: str) -> str | None:
+     if name.startswith("model.lm_head."):
+         return name.removeprefix("model.")
+     if name.startswith("mtp."):
+-        return name.replace("mtp.", "model.", 1)
++        name = name.replace("mtp.", "model.", 1)
++        # QSA cache scales (leoncca AWQ-g32 layout): AutoWeightsLoader applies
++        # quant_config.get_cache_scale_mapper() which rewrites 'X.k_scale' into
++        # 'X.attn.k_scale' (stock attention layout). QSAAttention has no 'attn'
++        # child and the draft path never runs _remap_qsa_cache_scale_name, so
++        # move them straight onto the owner buffers (_k_scale/_v_scale) and
++        # drop q_scale (input scales are never cached; no buffer exists).
++        if name.endswith(".self_attn.q_scale"):
++            return None
++        for _s in ("k_scale", "v_scale"):
++            if name.endswith(f".self_attn.{_s}") or name.endswith(
++                f".self_attn._{_s}"
++            ):
++                return f"{name[: name.rfind('.')]}._{_s}"
++        return name
+     if name.startswith("model.embed_tokens.") or name.startswith("lm_head."):
+         return name
+     return None
+@@ -224,8 +240,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
+         self.pre_fc_norm_embedding = GemmaRMSNorm(
+             self.hidden_size, eps=config.rms_norm_eps
+         )
+-        self.pre_fc_norm_hidden = GemmaRMSNorm(
+-            self.hidden_size * self.hc_count, eps=config.rms_norm_eps
++        self.pre_fc_norm_hidden = mtp_hidden_norm(
++            self.hidden_size, self.hc_count, eps=config.rms_norm_eps
+         )
+         # HC final mixer collapses the multi stream into [T, H] for the LM head.
+         hc_config = HyperConnectionConfig(
+
