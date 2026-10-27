@@ -11,14 +11,14 @@
 set -euo pipefail
 NAME=${NAME:-qwen-intel}
 PORT=${PORT:-8080}
-CONFIG=${CONFIG:-$PWD/configs/intel-1m-fp8-ssmbf16.yml}
+CONFIG=${CONFIG:-$PWD/configs/awq-1m-fp8-ssmbf16.yml}
 
 # Base image and fork tree are a matched pair: the stack is a pure-Python
 # overlay on the pinned nightly's compiled objects, so the fork checkout must
 # descend from a lineage based on that exact upstream commit — any other base
 # fails deep in its import chain.
 BASE=${BASE:-7d0b4e57aac4c4323225b0eee9ae960ce75ffffe}
-IMAGE=${IMAGE:-vllm/vllm-openai:nightly-$BASE}
+IMAGE=${IMAGE:-vllm-sm80:q38fn}   # local self-built image; nightly tag is not present in this docker
 FORK=${FORK:-$HOME/src/vllm-sm80}
 REQUIRED_REV=${REQUIRED_REV:-q38fn/stack}   # lineage that must be an ancestor of the fork checkout
 case "$IMAGE" in
@@ -47,7 +47,7 @@ QSA_CANONICAL=${QSA_CANONICAL:-1}  # 1 = QSA top-k tie fix (canonical set)
 QSA_SORTED=${QSA_SORTED:-1}    # 1 = also sort selected blocks ascending
 ROUTER_FP32=${ROUTER_FP32:-1}      # 1 = fp32 MoE router logits (Morrowmake port)
 MTP_PER_STREAM=${MTP_PER_STREAM:-0}  # 1 = per-stream MTP hidden norm (Morrowmake port)
-MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-w4a16-autoround}
+MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-awq-g32}
 
 mkdir -p runs/triton-cache
 D=$FORK/vllm
@@ -87,7 +87,8 @@ exec docker run -d --pull=never --name "$NAME" \
   -v "$D/v1/kv_offload/cpu/spec.py:$V/v1/kv_offload/cpu/spec.py:ro" \
   -v "$PWD/runs/triton-cache:/root/.triton:rw" \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-  -e NCCL_P2P_DISABLE=1 -e NCCL_DEBUG=WARN \
+  -e NCCL_P2P_DISABLE=1 -e NCCL_IB_DISABLE=1 -e NCCL_DEBUG=WARN \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -e PYTORCH_NVML_BASED_CUDA_CHECK=1 -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e VLLM_PP_LAYER_PARTITION="$PP_PARTITION" \
