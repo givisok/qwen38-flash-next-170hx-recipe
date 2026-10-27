@@ -26,6 +26,10 @@ max-num-batched-tokens: 8192
 gpu-memory-utilization: 0.94
 kv-cache-dtype: fp8_e4m3
 enable-prefix-caching: true
+# g4bwy recipe: retention multiple of the 1728 block + fine-grained match unit
+# (default retention 0 keeps almost nothing; default match floor = block = 1728)
+prefix-cache-retention-interval: 17280
+prefix-match-unit: 16
 enable-chunked-prefill: true
 mamba-cache-mode: align
 async-scheduling: true
