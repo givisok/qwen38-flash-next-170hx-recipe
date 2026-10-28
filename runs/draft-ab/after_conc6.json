@@ -1,0 +1,36 @@
+{
+ "tag": "after_conc6",
+ "n": 6,
+ "rounds": [
+  {
+   "wall_max": 4.16,
+   "wall_all": 4.16,
+   "tokens": 1536,
+   "aggregate_tok_s": 369.0,
+   "per_stream": [
+    70.1,
+    65.1,
+    79.5,
+    70.8,
+    84.4,
+    61.5
+   ],
+   "tokens_per_step": 2.417
+  },
+  {
+   "wall_max": 4.15,
+   "wall_all": 4.15,
+   "tokens": 1536,
+   "aggregate_tok_s": 370.3,
+   "per_stream": [
+    67.2,
+    65.7,
+    81.9,
+    84.8,
+    80.1,
+    61.7
+   ],
+   "tokens_per_step": 2.514
+  }
+ ]
+}

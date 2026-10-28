@@ -1,0 +1,123 @@
+{
+ "tag": "after_lh",
+ "ts": "2026-10-28 16:27:08",
+ "decode": [
+  [
+   {
+    "wall": 2.338,
+    "completion_tokens": 256,
+    "tok_s": 109.5,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.375,
+    "completion_tokens": 256,
+    "tok_s": 107.8,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.813,
+    "completion_tokens": 256,
+    "tok_s": 141.2,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 2.242,
+    "completion_tokens": 256,
+    "tok_s": 114.2,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ],
+  [
+   {
+    "wall": 2.21,
+    "completion_tokens": 256,
+    "tok_s": 115.8,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.395,
+    "completion_tokens": 256,
+    "tok_s": 106.9,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.833,
+    "completion_tokens": 256,
+    "tok_s": 139.7,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 1.764,
+    "completion_tokens": 256,
+    "tok_s": 145.1,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ]
+ ],
+ "greedy": {
+  "0": {
+   "content": "\n\nНебо голубое из-за рэлеевского рассеяния: молекулы воздуха сильнее рассеивают короткие волны (синий/фиолетовый), а глаза и Солнце делают доминирующим голубой. На закате свет проходит длинный путь в атмосфере, синий рассеивается и уходит, а до наблюдателя доходят преимущественно длинные волны — красные и оранжевые.",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\n```python\ndef is_palindrome(s):\n    cleaned = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return cleaned == cleaned[::-1]\n```\n\nExample:\n\n```python\nprint(is_palindrome(\"A man, a plan, a canal: Panama\"))  # True\nprint(is_palindrome(\"race a car\"))                      # False\n```",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "\n\nThe Industrial Revolution began in **Britain**, especially in **England**, in the **mid-to-late 18th century**—commonly dated from around **1760 to 1840** for the First Industrial Revolution.\n\nIts main drivers included:\n\n- **Agricultural improvements**: better farming methods increased food supply and freed labor for industry.\n- **Population growth**: provided workers and consumers.\n- **Natural resources**: abundant **coal and iron ore** powered factories and machinery.\n- **Technological innovation**: inventions such as the **steam engine**, spinning jenny, water frame, and power loom transformed textile production.\n- **Capital and entrepreneurship**: merchants and investors funded factories, mines, and transport.\n- **Trade and empire**: colonial markets supplied raw materials and demand for manufactured goods.\n- **Transport improvements**: canals, roads,",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "probe": {
+  "0": {
+   "content": "",
+   "finish": "length",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\nViktor: “The girl leaves school at three, alone, every day.”  \nMara: “Then we take her before the driver realizes the route’s changed.”  \nViktor: “No noise, no witnesses—just a clean snatch and a locked trunk.”",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "prefill32k": {
+  "wall": 16.149,
+  "prompt_tokens": 50499,
+  "tok_s": 3127.0,
+  "answer": "\n\n1519"
+ },
+ "acceptance": {},
+ "acceptance_r1": {
+  "drafts": 408.0,
+  "draft_tokens": 1224.0,
+  "accepted": 616.0,
+  "tokens_per_step": 2.5098,
+  "acc_rate": 0.5033,
+  "per_pos_accept": {
+   "0": 0.7034,
+   "1": 0.4877,
+   "2": 0.3186
+  }
+ },
+ "acceptance_r2": {
+  "drafts": 392.0,
+  "draft_tokens": 1176.0,
+  "accepted": 632.0,
+  "tokens_per_step": 2.6122,
+  "acc_rate": 0.5374,
+  "per_pos_accept": {
+   "0": 0.7449,
+   "1": 0.5179,
+   "2": 0.3495
+  }
+ }
+}
