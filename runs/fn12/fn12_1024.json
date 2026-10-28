@@ -1,0 +1,16 @@
+{
+ "tag": "fn12_1024",
+ "ts": "2026-10-28 19:35:54",
+ "B_ttft_s": 48.44,
+ "A_chunks": 344,
+ "A_window_chunks": 117,
+ "A_gaps_window": {
+  "max": 1.03,
+  "over_0p5s": 75,
+  "over_1s": 1,
+  "over_1p5s": 0,
+  "n": 116
+ },
+ "A_gaps_all_max": 1.03,
+ "A_effective_tok_s": 6.5
+}

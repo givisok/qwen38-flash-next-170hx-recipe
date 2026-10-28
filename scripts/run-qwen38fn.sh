@@ -49,6 +49,7 @@ ROUTER_FP32=${ROUTER_FP32:-1}      # 1 = fp32 MoE router logits (Morrowmake port
 MTP_PER_STREAM=${MTP_PER_STREAM:-0}  # 1 = per-stream MTP hidden norm (Morrowmake port)
 PP_INT8_HOP=${PP_INT8_HOP:-1}        # 1 = int8 PP handoff (g4bwy patch 0006 port); A/B: PP_INT8_HOP=0 ./run-qwen38fn.sh
 MTP_DRAFT_HEAD=${MTP_DRAFT_HEAD:-1}  # 1 = W4A16 GPTQ-Marlin MTP draft lm_head (AlexBrandes 14457f89 port); A/B: MTP_DRAFT_HEAD=0 ./run-qwen38fn.sh
+MIXED_PREFILL_CHUNK=${MIXED_PREFILL_CHUNK:-864}  # FN12 bounded prefill beside decodes (AlexBrandes 31208d20 port), tokens per awaiting prompt per step; 0 = off; <block 1728 takes the sub-block path
 MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-awq-g32}
 DRAFT_HEAD_PATH=""
 [ "$MTP_DRAFT_HEAD" = 1 ] && DRAFT_HEAD_PATH="/models/$(basename "$MODEL_DIR")/draft-lm-head-w4a16-g128.safetensors"
@@ -88,6 +89,7 @@ exec docker run -d --pull=never --name "$NAME" \
   -v "$D/v1/spec_decode/llm_base_proposer.py:$V/v1/spec_decode/llm_base_proposer.py:ro" \
   -v "$D/v1/worker/gpu/spec_decode/dflash/speculator.py:$V/v1/worker/gpu/spec_decode/dflash/speculator.py:ro" \
   -v "$D/v1/worker/gpu/spec_decode/eagle/utils.py:$V/v1/worker/gpu/spec_decode/eagle/utils.py:ro" \
+  -v "$D/v1/core/sched/scheduler.py:$V/v1/core/sched/scheduler.py:ro" \
   -v "$D/v1/kv_offload/tiering/fs/manager.py:$V/v1/kv_offload/tiering/fs/manager.py:ro" \
   -v "$D/v1/kv_offload/tiering/spec.py:$V/v1/kv_offload/tiering/spec.py:ro" \
   -v "$D/v1/kv_offload/cpu/spec.py:$V/v1/kv_offload/cpu/spec.py:ro" \
@@ -103,6 +105,7 @@ exec docker run -d --pull=never --name "$NAME" \
   -e "VLLM_QWEN4_ROUTER_FP32=$ROUTER_FP32" -e "VLLM_QWEN4_MTP_PER_STREAM_NORM=$MTP_PER_STREAM" \
   -e "VLLM_QWEN4EXP_PP_INT8_HOP=$PP_INT8_HOP" \
   -e "VLLM_MTP_DRAFT_HEAD_PATH=$DRAFT_HEAD_PATH" \
+  -e "VLLM_MIXED_PREFILL_CHUNK=$MIXED_PREFILL_CHUNK" \
   -v "$PWD/configs/chat_template.jinja:/opt/chat_template.jinja:ro" \
   -e "QWEN4EXP_PLE_MODEL_DIR=/models/$(basename "$MODEL_DIR")" \
   --entrypoint vllm "$IMAGE" \

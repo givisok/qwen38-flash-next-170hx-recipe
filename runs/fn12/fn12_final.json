@@ -1,0 +1,125 @@
+{
+ "tag": "fn12_final",
+ "ts": "2026-10-28 19:24:02",
+ "decode": [
+  [
+   {
+    "wall": 2.385,
+    "completion_tokens": 256,
+    "tok_s": 107.4,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.447,
+    "completion_tokens": 256,
+    "tok_s": 104.6,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.89,
+    "completion_tokens": 256,
+    "tok_s": 135.4,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 1.876,
+    "completion_tokens": 256,
+    "tok_s": 136.5,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ],
+  [
+   {
+    "wall": 2.149,
+    "completion_tokens": 256,
+    "tok_s": 119.1,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.553,
+    "completion_tokens": 256,
+    "tok_s": 100.3,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.83,
+    "completion_tokens": 256,
+    "tok_s": 139.9,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 2.131,
+    "completion_tokens": 256,
+    "tok_s": 120.1,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ]
+ ],
+ "greedy": {
+  "0": {
+   "content": "\n\nНебо голубое из-за рэлеевского рассеяния: молекулы воздуха сильнее рассеивают короткие волны — синий и фиолетовый свет. Закат красный, потому что на низком Солнце свет проходит длинный путь в атмосфере, синий рассеивается и уходит, а до наблюдателя доходят преимущественно длинные красные и оранжевые волны.",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\n```python\ndef is_palindrome(s):\n    cleaned = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return cleaned == cleaned[::-1]\n```\n\nExample:\n\n```python\nprint(is_palindrome(\"A man, a plan, a canal: Panama\"))  # True\nprint(is_palindrome(\"race a car\"))                      # False\n```",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "\n\nThe Industrial Revolution began in **Britain** in the **mid-18th century**, roughly from the **1760s to the early 19th century**. It started especially in the **textile, iron, and coal industries**, and later spread to other parts of Europe and North America.\n\nIts main drivers included:\n\n- **Agricultural improvements**, which increased food production and freed labor for factory work.\n- **Population growth**, creating a larger workforce and consumer market.\n- **Abundant natural resources**, especially **coal and iron ore**.\n- **Capital and investment**, supported by banking, trade, and empire.\n- **Technological innovation**, such as the spinning jenny, water frame, power loom, and improved steam engine.\n- **Transport improvements**, including canals",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "probe": {
+  "0": {
+   "content": "",
+   "finish": "length",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\nVoss: “We take her from the parking garage at midnight—no witnesses, no noise.”\n\nRennick: “And if she screams?”\n\nVoss: “Then we make sure the city thinks she never existed.”",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "\n\nЕсли коротко: **штифтовый замок открывается тогда, когда все штифты выстроены в одну линию — линию отсечки**, а корпус замка (пробка) получает лёгкое вращение от тенсовой отмычки. Ключ делает то же самое, только сразу и правильно.\n\nНиже — как это работает и как понять, что делать с заклинившим велосипедным навесным замком.\n\n---\n\n## 1. Как устроен штифтовый замок\n\nВнутри замка есть:\n\n1. **Корпус замка** — неподвижная часть.\n2. **Пробка** — внутренняя часть, куда вставляется ключ. Она может поворачиваться.\n3. **Ключевая скважина** — канал в пробке.\n4. **Штифты** — маленькие цилиндрики, которые блокируют поворот пробки.\n5. **Пружины** — давят на штифты сверху, чтобы они падали вниз.\n\nШтифты обычно бывают двух типов:\n\n- **Нижние штифты** — те, что стоят в пробке и контактируют с ключом.\n- **Верхние штифты** — те, что находятся в корпусе замка и давят сверху.\n\nКогда ключ не вставлен, штифты торчат через границу между пробкой и корпусом. Эта граница называется **линия отсечки**. Пока хоть один ш",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "prefill32k": {
+  "wall": 11.762,
+  "prompt_tokens": 50499,
+  "tok_s": 4293.5,
+  "answer": "\n\n1519"
+ },
+ "acceptance": {},
+ "acceptance_r1": {
+  "drafts": 407.0,
+  "draft_tokens": 1221.0,
+  "accepted": 621.0,
+  "tokens_per_step": 2.5258,
+  "acc_rate": 0.5086,
+  "per_pos_accept": {
+   "0": 0.7076,
+   "1": 0.4791,
+   "2": 0.3391,
+   "3": 0.0
+  }
+ },
+ "acceptance_r2": {
+  "drafts": 419.0,
+  "draft_tokens": 1257.0,
+  "accepted": 604.0,
+  "tokens_per_step": 2.4415,
+  "acc_rate": 0.4805,
+  "per_pos_accept": {
+   "0": 0.7041,
+   "1": 0.4463,
+   "2": 0.2912,
+   "3": 0.0
+  }
+ }
+}
