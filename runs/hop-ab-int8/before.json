@@ -1,0 +1,34 @@
+{
+ "prefill32k_hopbase-1": {
+  "wall": 8.738034963607788,
+  "prompt": 32012,
+  "toks": 3663.52390821549
+ },
+ "prefill32k_hopbase-2": {
+  "wall": 7.641265630722046,
+  "prompt": 32012,
+  "toks": 4189.358353319683
+ },
+ "prefill120k": {
+  "wall": 32.21252942085266,
+  "prompt": 120012,
+  "toks": 3725.6310559179706
+ },
+ "decode1": {
+  "wall": 6.957170009613037,
+  "toks": 73.59314193738925
+ },
+ "decode2": {
+  "wall": 2.984053134918213,
+  "toks": 171.57871420209577
+ },
+ "greedy": {
+  "0": "Солнечный свет, проходя через атмосферу Земли, рассеивается молекулами воздуха, причем короткие волны синего цвета рассеиваются значительно сильнее, чем длинные волны красного. Из-за этого эффекта, называемого рэлеевским рассеянием, именно синий свет достигает наших глаз со всех направлений неба. В результате мы воспринимаем небосвод как голубой, особенно в ясную погоду, когда в атмосфере мало крупных частиц, искажающих этот процесс.",
+  "1": "```python\ndef is_palindrome(s: str) -> bool:\n    \"\"\"\n    Check if a string is a palindrome, ignoring punctuation and case.\n    \n    Args:\n        s: The input string to check.\n        \n    Returns:\n        True if the string is a palindrome (ignoring punctuation and case), False otherwise.\n    \"\"\"\n    # Filter out non-alphanumeric characters and convert to lowercase\n    cleaned = ''.join(char.lower() for char in s if char.isalnum())\n    \n    # Check if the cleaned string is equal to its reverse\n    return cleaned == cleaned[::-1]\n```",
+  "2": "The Industrial Revolution started in late 18th-century Britain, fueled by steam power, textile machinery, and coal, which led to rapid urbanization and resulted in over half of the population living in cities by 1850."
+ },
+ "needle": {
+  "answer": "XORD-4721",
+  "cached": 0
+ }
+}
