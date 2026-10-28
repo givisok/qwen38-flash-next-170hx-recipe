@@ -46,9 +46,12 @@ compilation-config:
   cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64]
 enable-flashinfer-autotune: false
 
-# spec decode: inline MTP (checkpoint ships the draft in model_extra_tensors)
+# spec decode: MTP draft = author's standalone mtp-fp8 (FP8 E4M3 block-128 experts).
+# A/B: revert to the embedded root-index draft by commenting the model: line
+# (checkpoint ships the draft in model_extra_tensors, BF16 experts).
 speculative-config:
   method: mtp
+  model: /models/qwen38fn-awq-g32/mtp-fp8
   num_speculative_tokens: 3
 
 # templates & parsers (model's own chat template mounted at /opt)
