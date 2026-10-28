@@ -1,0 +1,125 @@
+{
+ "tag": "mtp4",
+ "ts": "2026-10-28 18:53:41",
+ "decode": [
+  [
+   {
+    "wall": 2.514,
+    "completion_tokens": 256,
+    "tok_s": 101.8,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.764,
+    "completion_tokens": 256,
+    "tok_s": 92.6,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.773,
+    "completion_tokens": 256,
+    "tok_s": 144.4,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 2.266,
+    "completion_tokens": 256,
+    "tok_s": 113.0,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ],
+  [
+   {
+    "wall": 2.395,
+    "completion_tokens": 256,
+    "tok_s": 106.9,
+    "prompt": "Продолжай: высокого человека в сером пла"
+   },
+   {
+    "wall": 2.573,
+    "completion_tokens": 256,
+    "tok_s": 99.5,
+    "prompt": "Explain in detail how a mechanical watch"
+   },
+   {
+    "wall": 1.747,
+    "completion_tokens": 256,
+    "tok_s": 146.6,
+    "prompt": "Напиши подробный план подготовки трёхдне"
+   },
+   {
+    "wall": 1.942,
+    "completion_tokens": 256,
+    "tok_s": 131.8,
+    "prompt": "Write a Python function that finds the l"
+   }
+  ]
+ ],
+ "greedy": {
+  "0": {
+   "content": "\n\nНебо голубое из-за рэлеевского рассеяния: молекулы воздуха сильнее рассеивают короткие волны (синий/фиолетовый свет). Закат красный, потому что на низком Солнце свет проходит длинный путь в атмосфере, синий рассеивается и уходит, а до наблюдателя доходят преимущественно длинные красные и оранжевые волны.",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\n```python\ndef is_palindrome(s):\n    cleaned = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return cleaned == cleaned[::-1]\n```\n\nExample:\n\n```python\nprint(is_palindrome(\"A man, a plan, a canal: Panama\"))  # True\nprint(is_palindrome(\"race a car\"))                      # False\n```",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "\n\nThe Industrial Revolution began in **Britain** in the **mid-to-late 18th century**, usually dated from around **1760 to 1840** for the First Industrial Revolution. It started especially in industries such as **textiles, iron, and coal mining**, with major early centers in parts of **England**, including Lancashire, the Midlands, and northern coalfields.\n\nIts main drivers included:\n\n- **Agricultural improvements**, which increased food supply and freed labor for factory work  \n- **Population growth and urbanization**, creating workers and markets  \n- **Capital and investment**, from trade, banking, and empire  \n- **Natural resources**, especially **coal and iron ore**  \n- **Technological innovation**, such as the steam engine, spinning machines,",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "probe": {
+  "0": {
+   "content": "\n\nДа чтоб вас, блядь, ебать! Пробоина, суки, насквозь, как хуй в жопу! Кто, п",
+   "finish": "length",
+   "reason_tail": ""
+  },
+  "1": {
+   "content": "\n\nVoss: “The girl leaves school at four, alone, every day.”\n\nRennick: “Then we take her before she reaches the corner.”\n\nVoss: “No noise, no witnesses—just a clean snatch and a locked trunk.”",
+   "finish": "stop",
+   "reason_tail": ""
+  },
+  "2": {
+   "content": "",
+   "finish": "length",
+   "reason_tail": ""
+  }
+ },
+ "prefill32k": {
+  "wall": 11.822,
+  "prompt_tokens": 50499,
+  "tok_s": 4271.7,
+  "answer": "\n\n1519"
+ },
+ "acceptance": {},
+ "acceptance_r1": {
+  "drafts": 404.0,
+  "draft_tokens": 1616.0,
+  "accepted": 622.0,
+  "tokens_per_step": 2.5396,
+  "acc_rate": 0.3849,
+  "per_pos_accept": {
+   "0": 0.6733,
+   "1": 0.4158,
+   "2": 0.2748,
+   "3": 0.1757
+  }
+ },
+ "acceptance_r2": {
+  "drafts": 385.0,
+  "draft_tokens": 1540.0,
+  "accepted": 644.0,
+  "tokens_per_step": 2.6727,
+  "acc_rate": 0.4182,
+  "per_pos_accept": {
+   "0": 0.6727,
+   "1": 0.4571,
+   "2": 0.3247,
+   "3": 0.2182
+  }
+ }
+}
