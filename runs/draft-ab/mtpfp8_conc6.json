@@ -1,0 +1,36 @@
+{
+ "tag": "mtpfp8_conc6",
+ "n": 6,
+ "rounds": [
+  {
+   "wall_max": 4.32,
+   "wall_all": 4.32,
+   "tokens": 1536,
+   "aggregate_tok_s": 355.4,
+   "per_stream": [
+    66.9,
+    63.2,
+    74.8,
+    67.3,
+    74.7,
+    59.3
+   ],
+   "tokens_per_step": 2.458
+  },
+  {
+   "wall_max": 4.11,
+   "wall_all": 4.11,
+   "tokens": 1536,
+   "aggregate_tok_s": 373.9,
+   "per_stream": [
+    71.6,
+    63.2,
+    79.9,
+    83.1,
+    62.3,
+    64.1
+   ],
+   "tokens_per_step": 2.473
+  }
+ ]
+}
