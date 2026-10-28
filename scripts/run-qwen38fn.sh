@@ -47,6 +47,7 @@ QSA_CANONICAL=${QSA_CANONICAL:-1}  # 1 = QSA top-k tie fix (canonical set)
 QSA_SORTED=${QSA_SORTED:-1}    # 1 = also sort selected blocks ascending
 ROUTER_FP32=${ROUTER_FP32:-1}      # 1 = fp32 MoE router logits (Morrowmake port)
 MTP_PER_STREAM=${MTP_PER_STREAM:-0}  # 1 = per-stream MTP hidden norm (Morrowmake port)
+PP_INT8_HOP=${PP_INT8_HOP:-1}        # 1 = int8 PP handoff (g4bwy patch 0006 port); A/B: PP_INT8_HOP=0 ./run-qwen38fn.sh
 MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-awq-g32}
 
 mkdir -p runs/triton-cache
@@ -96,6 +97,7 @@ exec docker run -d --pull=never --name "$NAME" \
   -e "VLLM_PLE_MMAP=$PLE_MMAP" -e "VLLM_PLE_STAGED=$PLE_STAGED" -e VLLM_PLE_SYNC=1 \
   -e "VLLM_QWEN4_QSA_TOPK_CANONICAL=$QSA_CANONICAL" -e "VLLM_QWEN_QSA_TOPK_SORTED=$QSA_SORTED" \
   -e "VLLM_QWEN4_ROUTER_FP32=$ROUTER_FP32" -e "VLLM_QWEN4_MTP_PER_STREAM_NORM=$MTP_PER_STREAM" \
+  -e "VLLM_QWEN4EXP_PP_INT8_HOP=$PP_INT8_HOP" \
   -v "$PWD/configs/chat_template.jinja:/opt/chat_template.jinja:ro" \
   -e "QWEN4EXP_PLE_MODEL_DIR=/models/$(basename "$MODEL_DIR")" \
   --entrypoint vllm "$IMAGE" \
