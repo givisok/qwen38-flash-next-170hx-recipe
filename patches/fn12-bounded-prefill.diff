@@ -1,0 +1,127 @@
+--- scheduler.orig.py	2026-10-28 19:07:00.579380331 +0300
++++ scheduler.py	2026-10-28 19:06:34.015995075 +0300
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import itertools
++import os
+ import time
+ from collections import defaultdict, deque
+ from collections.abc import Iterable
+@@ -362,6 +363,24 @@
+         )
+ 
+         self.has_mamba_layers = kv_cache_config.has_mamba_layers
++        # FN12 (CMP Flash-Next; port of AlexBrandes/vllm 31208d20): while any
++        # running request is decoding, a step's prefill tokens are capped at
++        # VLLM_MIXED_PREFILL_CHUNK x (prompts awaiting prefill), at most one
++        # Mamba block, and spent oldest-first (v2; v1 capped each request, so a
++        # burst of arrivals shared the steps and every first token came late).
++        # A budget below the block takes the sub-block path in the aligned
++        # split, so a lone prompt advances every step instead of flooring to 0
++        # and decoders see short steps. With no decoder running, prefill uses
++        # the full budget. 0 = off.
++        self.mixed_prefill_chunk = int(
++            os.environ.get("VLLM_MIXED_PREFILL_CHUNK", "0") or 0
++        )
++        self.step_prefill_cap = 0
++        self.step_prefill_left: int | None = None
++        if self.mixed_prefill_chunk:
++            logger.info(
++                "FN12 mixed-step prefill cap: %d tokens", self.mixed_prefill_chunk
++            )
+         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+         self.need_mamba_block_aligned_split = (
+             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+@@ -498,6 +517,8 @@
+             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+             if long_prefill_threshold > 0:
+                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
++            if self.step_prefill_left is not None:
++                max_prefill_tokens = min(max_prefill_tokens, self.step_prefill_cap)
+             aligned_end = end // block_size * block_size
+             if aligned_end > start or block_size <= max_prefill_tokens:
+                 end = aligned_end
+@@ -643,6 +664,24 @@
+                 long_prefill_token_threshold, input_budget // num_eligible_reqs
+             )
+ 
++        # FN12: budget prefill on every step while a decoder is running.
++        # Under PP a decoder skips steps, but the step in between still delays
++        # it, so the budget keys on decoders existing, not on rows in this step.
++        self.step_prefill_left = None
++        self.step_prefill_cap = 0
++        if self.mixed_prefill_chunk and any(
++            not r.is_prefill_chunk for r in self.running
++        ):
++            awaiting = (
++                sum(1 for r in self.running if r.is_prefill_chunk)
++                + len(self.waiting)
++                + len(self.kv_holding_waiting)
++            )
++            self.step_prefill_left = min(
++                self.mixed_prefill_chunk * max(1, awaiting),
++                max(self.cache_config.block_size, self.mixed_prefill_chunk),
++            )
++
+         # First, schedule the RUNNING requests.
+         req_index = 0
+         while req_index < len(self.running) and token_budget > 0:
+@@ -696,6 +735,12 @@
+             )
+             if 0 < long_prefill_token_threshold < num_new_tokens:
+                 num_new_tokens = long_prefill_token_threshold
++            fn12_prefill = (
++                self.step_prefill_left is not None and request.is_prefill_chunk
++            )
++            if fn12_prefill:
++                self.step_prefill_cap = self.step_prefill_left
++                num_new_tokens = min(num_new_tokens, self.step_prefill_left)
+             num_new_tokens = min(
+                 num_new_tokens, token_budget, input_budget - draft_slots
+             )
+@@ -844,6 +889,10 @@
+             num_scheduled_tokens[request_id] = num_new_tokens
+             token_budget -= num_new_tokens
+             input_budget -= num_new_tokens + draft_slots
++            if fn12_prefill:
++                self.step_prefill_left = max(
++                    0, self.step_prefill_left - num_new_tokens
++                )
+             req_index += 1
+ 
+             # Speculative decode related.
+@@ -1089,6 +1138,7 @@
+                 duplicate_encoder_inputs = []
+                 new_encoder_compute_budget = encoder_compute_budget
+                 pad_spec_decode = False
++                fn12_prefill = False
+ 
+                 # SWA bounded replay: recompute the tail of the hit without
+                 # rewriting its cached KV. An async load replays once the KV
+@@ -1143,6 +1193,14 @@
+ 
+                     if 0 < long_prefill_token_threshold < num_new_tokens:
+                         num_new_tokens = long_prefill_token_threshold
++                    fn12_prefill = (
++                        self.step_prefill_left is not None and not pad_spec_decode
++                    )
++                    if fn12_prefill:
++                        self.step_prefill_cap = self.step_prefill_left
++                        num_new_tokens = min(num_new_tokens, self.step_prefill_left)
++                        if num_new_tokens == 0:
++                            break
+ 
+                     # chunked prefill has to be enabled explicitly to allow
+                     # pooling requests to be chunked
+@@ -1354,6 +1412,10 @@
+                 num_scheduled_tokens[request_id] = num_new_tokens
+                 token_budget -= num_new_tokens
+                 input_budget -= num_new_tokens + draft_slots
++                if fn12_prefill:
++                    self.step_prefill_left = max(
++                        0, self.step_prefill_left - num_new_tokens
++                    )
+                 request.status = RequestStatus.RUNNING
+                 request.num_computed_tokens = num_computed_tokens
+                 self._set_kv_fetch_stage(request, None)

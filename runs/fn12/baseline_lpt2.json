@@ -1,0 +1,16 @@
+{
+ "tag": "baseline_lpt2",
+ "ts": "2026-10-28 19:09:43",
+ "B_ttft_s": 44.21,
+ "A_chunks": 380,
+ "A_window_chunks": 123,
+ "A_gaps_window": {
+  "max": 1.155,
+  "over_0p5s": 38,
+  "over_1s": 37,
+  "over_1p5s": 0,
+  "n": 122
+ },
+ "A_gaps_all_max": 1.155,
+ "A_effective_tok_s": 7.7
+}
