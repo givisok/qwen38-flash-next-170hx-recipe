@@ -23,6 +23,7 @@ max-model-len: 1048576
 block-size: 1728
 max-num-seqs: 16
 max-num-batched-tokens: 8192
+long-prefill-token-threshold: 2048
 gpu-memory-utilization: 0.94
 kv-cache-dtype: fp8_e4m3
 enable-prefix-caching: true
