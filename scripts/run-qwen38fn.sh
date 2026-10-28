@@ -56,6 +56,7 @@ V=/usr/local/lib/python3.12/dist-packages/vllm
 docker rm -f "$NAME" 2>/dev/null || true
 rm -f /dev/shm/vllm_offload_*.mmap /dev/shm/psm_* /dev/shm/sem.mp-* 2>/dev/null || true   # stale shm from the previous kill
 exec docker run -d --pull=never --name "$NAME" \
+  --restart unless-stopped \
   --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -p "0.0.0.0:${PORT}:8000" \
   -v /home/models:/models:ro \
