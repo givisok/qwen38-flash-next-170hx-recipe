@@ -6,8 +6,10 @@ Home LLM rig: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** on vLLM with
 pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)**,
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
-Working point: ~120 tok/s single-stream, ~45 tok/s per request at 16 concurrent
-(~600 tok/s aggregate), prefill up to 7,900 tok/s on a 79K-token prompt.
+Working point (2026-10-30, after the tuning series in
+[`TUNING-2026-10-27.md`](TUNING-2026-10-27.md)): single-stream 105–151 tok/s
+(battery mean ~132), 6 concurrent up to **402 tok/s aggregate**, KV pool
+**5.21M tokens = 4.97×** concurrency at 1M, cold 120K prefill 3.7–4.5k tok/s.
 
 ---
 
@@ -44,15 +46,15 @@ Final serve config: [`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf1
 | Parameter | Value | Why |
 |---|---|---|
 | `pipeline-parallel-size` | 3 | P2P between the cards is broken (DMA glitches on this hardware) → TP is impossible, PP only |
-| `VLLM_PP_LAYER_PARTITION` | **17,16,15** | 48 layers; per-rank utilization/power measurements showed: the last rank also carries the MTP draft — it is the heaviest, so it gets fewer layers. Sweeping 16/16/16 → 17/16/15 gave +7.5% single-stream; 18/16/14 is worse |
-| `speculative-config` | `method: mtp, num_speculative_tokens: 3` | The draft ships in the checkpoint; +75% single-stream (120 vs 66–70 without MTP). Tried ngram_gpu — worse |
+| `VLLM_PP_LAYER_PARTITION` | **17,17,14** | 48 layers. The last rank carries the target `lm_head` + MTP draft + the W4A16 draft head, and the KV planner takes the **min raw bytes across ranks** — PP2 binds the pool. 2026-10-30: one layer off PP2 → pool 4.69×→4.97×, decode neutral (max layers/rank still 17), N=6 aggregate record 402 tok/s. Earlier: 17,16,15 (utilization sweep, +7.5% single-stream vs 16/16/16); 17,18,13 NOT recommended — hits PP0's byte ceiling and unbalances decode |
+| `speculative-config` | `method: mtp, model: …/mtp-fp8, num_speculative_tokens: 3` | +75% single-stream (120 vs 66–70 without MTP); ngram_gpu tried — worse. 2026-10-28: switched to the author's FP8 draft (`mtp-fp8/` in the checkpoint dir) — one config line, +8% single-stream, KV pool 4.29×→4.69×. MTP depth 4 measured and rejected (−8%) |
 | `max-num-seqs` | 16 | 8→16 raised aggregate from 360 to ~500–600 tok/s; cards sit at 84–100% utilization |
 | `cudagraph_capture_sizes` | `[1,2,4,...,64]` step 4 | from the mannydelrio repo: the MTP batch rounds up to 4 |
-| `kv-cache-dtype` | fp8_e4m3 | software emulation on sm80; KV pool of 4.57M tokens |
+| `kv-cache-dtype` | fp8_e4m3 | software emulation on sm80; KV pool of 5.21M tokens (current) |
 | `max-model-len` | 1,048,576 | YaRN ×4 over 262144 (in `hf-overrides`, plus `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`), `block-size: 1728`, `rope_theta 1e7` |
 | `layer_types` override | 3× linear_attention + 1× qwen_sparse_attention ×12 | bridges the transformers rename (full_attention → indexed_attention) |
 | `NCCL_P2P_DISABLE=1` + `disable-custom-all-reduce` | | P2P hangs on these cards |
-| `gpu-memory-utilization` | 0.94 | ceiling without OOM; KV pool of 4,573,327 tokens, 4.36× concurrency at 1M |
+| `gpu-memory-utilization` | 0.94 | ceiling without OOM; KV pool of 5,214,494 tokens, 4.97× concurrency at 1M (2026-10-30, after the head fix + repartition; was 4,573,327 / 4.36× at bring-up) |
 | **kv-transfer-config (tiering)** | **ABSENT (removed)** | see §6 — the source of KV corruption |
 
 ## 4. Fork patches for this checkpoint (required)
@@ -96,6 +98,29 @@ tree (the launcher bind-mounts the fork files over the image):
    48.4%; the draft is calibrated with the flat norm. Additionally:
    `VLLM_MOE_SKIP_PADDING=1` (padding rows never reach the experts) is already on
    by default in the fork — no port needed. Details: `patches/NOTES.md`.
+6. **`pp-int8-hop.diff`** (2026-10-28, port of
+   [g4bwy](https://github.com/g4bwy/qwen3.8-flash-next-cmp-170hx) patch 0006) —
+   int8 PP pipeline handoff (`PP_INT8_HOP=1` in the launcher): cold 120K prefill
+   **+15–21%**, decode unchanged, KV pool +13K (halved receive buffers). Gates:
+   needle through the int8 path OK, greedy A/B 2/3 byte-identical.
+7. **`mtp-draft-head-w4a16.diff`** (2026-10-28, port of
+   [AlexBrandes/vllm](https://github.com/AlexBrandes/vllm) 14457f89) +
+   `scripts/quantize_lm_head.py` — the MTP draft keeps its own W4A16 GPTQ-Marlin
+   `lm_head` (int4 g128 sym, built from THIS checkpoint's `lm_head.weight`;
+   artifact `draft-lm-head-w4a16-g128.safetensors` next to the model) instead of
+   adopting the target's BF16 head: ~0.95 GiB less weight read per draft step.
+   Acceptance unchanged; `MTP_DRAFT_HEAD=1`.
+8. **`fn12-bounded-prefill.diff`** (2026-10-28, port of AlexBrandes/vllm 31208d20)
+   — bounded prefill beside running decodes (`MIXED_PREFILL_CHUNK=864`): decode
+   stalls >1 s during a concurrent 120K prefill went **37–38 → 0** (max gap
+   1.19 s → 0.75 s) at +10% prefill TTFT. 512 and 1024 measured and rejected.
+9. **`pp-head-missing.diff`** (2026-10-30, after
+   [Morrowmake/vllm-cmp170hx](https://github.com/Morrowmake/vllm-cmp170hx) f2815b1
+   / newer upstream) — non-last PP stages build `PPMissingLayer` instead of a full
+   BF16 `lm_head`: −1.17 GiB of dead weight on each of PP0/PP1 (also: no dead-head
+   warmup, faster checkpoint load). Note: the KV pool itself is set by the
+   raw-byte minimum across ranks (a per-layer-normalized estimate of the pool gain
+   was wrong — see TUNING); the pool gain came from the §3 repartition instead.
 
 ## 5. Running and operations
 
@@ -144,7 +169,9 @@ cd /root/qwen38fn && IMAGE=vllm-sm80:q38fn FORK=/root/src/vllm-sm80 ./run-qwen38
    oversubscription) — everything queues, oom_kill=0; script `scripts/oomtest.py`.
    But exactly this churn pushed the tier into eviction and triggered item 2.
 
-## 7. Measurements (AWQ-g32, final, vs Intel AutoRound W4A16)
+## 7. Measurements
+
+Bring-up era (2026-10-24…26, AWQ-g32 vs Intel AutoRound W4A16):
 
 | Test | Intel W4A16 | AWQ-g32 |
 |---|---|---|
@@ -156,8 +183,23 @@ cd /root/qwen38fn && IMAGE=vllm-sm80:q38fn FORK=/root/src/vllm-sm80 ./run-qwen38
 | GPU KV pool | 4.45M | 4.57M tokens |
 | Checkpoint on disk | 169 GB | 133 GB (PLE 51 GB fp8) |
 
+Current state after the 2026-10-27…30 tuning series (prefix-cache knobs, LPT 2048,
+int8 hop, W4A16 draft head, mtp-fp8 draft, FN12 bounded prefill, PPMissingLayer
+head fix, PP repartition — every step with A/B data in
+[`TUNING-2026-10-27.md`](TUNING-2026-10-27.md)):
+
+| Test | bring-up era | current (2026-10-30) |
+|---|---|---|
+| Single stream, battery mean (4×2, temp 0) | 117–129 | **132** (105–151; 150-ceiling above every prior cell) |
+| 6 concurrent, aggregate | — | **375 / 402 tok/s** (402 = best ever recorded) |
+| Cold prefill 120K | ~3.7k tok/s | 3.7–4.5k tok/s (int8 hop +15–21%) |
+| GPU KV pool | 4.57M / 4.36× | **5,214,494 / 4.97×** |
+| MTP acceptance | 2.35–2.6 tok/step | 2.35–2.75 tok/step |
+
 Benchmark scripts: `scripts/verify16.sh` (parallel load + GPU utilization),
-`scripts/prefill.py` (PP/TG), `scripts/oomtest.py` (memory stress).
+`scripts/prefill.py` (PP/TG), `scripts/oomtest.py` (memory stress);
+the tuning-series battery: `scripts/bench_draft_ab.py`, `scripts/bench_conc.py`,
+`scripts/probe_contention.py` (artifacts in `runs/`).
 
 ## 8. Reproducing from scratch (short version)
 
