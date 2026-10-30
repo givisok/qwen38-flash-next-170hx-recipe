@@ -39,7 +39,7 @@ verify_rev() {
 }
 verify_rev "$REQUIRED_REV" || exit 1
 verify_rev "$BASE" || exit 1
-PP_PARTITION=${PP_PARTITION:-17,16,15}
+PP_PARTITION=${PP_PARTITION:-17,17,14}  # decoder layers per PP rank; 17,17,14 moves one layer off the last rank (target head+draft live there, it binds the KV pool by raw bytes); rollback: PP_PARTITION=17,16,15
 PLE_STAGED=${PLE_STAGED:-1}   # 1 = shard-direct preadv PLE (default; needs no .bin)
 PLE_MMAP=${PLE_MMAP:-0}       # 1 = legacy assembled-.bin mmap path (reference only)
 PLE_ZERO=${PLE_ZERO:-0}
