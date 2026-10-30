@@ -1,0 +1,98 @@
+{
+ "tag": "after",
+ "ts": "2026-10-30 17:09:35",
+ "cells": {
+  "P8640_G900": {
+   "P_target": 8640,
+   "G_target": 900,
+   "prime": {
+    "wall": 2.556,
+    "prompt_tokens": 9264,
+    "cached": 0,
+    "completion_tokens": 1
+   },
+   "grow": {
+    "wall": 1.218,
+    "prompt_tokens": 10266,
+    "cached": 6912,
+    "completion_tokens": 1
+   },
+   "incremental_new_tokens": 3354,
+   "incremental_tok_s": 2753.7
+  },
+  "P8640_G1729": {
+   "P_target": 8640,
+   "G_target": 1729,
+   "prime": {
+    "wall": 2.528,
+    "prompt_tokens": 9264,
+    "cached": 0,
+    "completion_tokens": 1
+   },
+   "grow": {
+    "wall": 1.346,
+    "prompt_tokens": 11167,
+    "cached": 6912,
+    "completion_tokens": 1
+   },
+   "incremental_new_tokens": 4255,
+   "incremental_tok_s": 3161.2
+  },
+  "P17280_G3000": {
+   "P_target": 17280,
+   "G_target": 3000,
+   "prime": {
+    "wall": 6.378,
+    "prompt_tokens": 27664,
+    "cached": 0,
+    "completion_tokens": 1
+   },
+   "grow": {
+    "wall": 1.622,
+    "prompt_tokens": 30947,
+    "cached": 25920,
+    "completion_tokens": 1
+   },
+   "incremental_new_tokens": 5027,
+   "incremental_tok_s": 3099.3
+  },
+  "P8640_G300": {
+   "P_target": 8640,
+   "G_target": 300,
+   "prime": {
+    "wall": 2.501,
+    "prompt_tokens": 9264,
+    "cached": 0,
+    "completion_tokens": 1
+   },
+   "grow": {
+    "wall": 0.998,
+    "prompt_tokens": 9612,
+    "cached": 6912,
+    "completion_tokens": 1
+   },
+   "incremental_new_tokens": 2700,
+   "incremental_tok_s": 2705.4
+  }
+ },
+ "cold": [
+  {
+   "wall": 4.77,
+   "prompt_tokens": 20639,
+   "cached": 0,
+   "completion_tokens": 1
+  },
+  {
+   "wall": 4.78,
+   "prompt_tokens": 20639,
+   "cached": 0,
+   "completion_tokens": 1
+  },
+  {
+   "wall": 4.779,
+   "prompt_tokens": 20639,
+   "cached": 0,
+   "completion_tokens": 1
+  }
+ ]
+}
