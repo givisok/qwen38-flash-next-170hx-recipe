@@ -1,0 +1,27 @@
+{
+  "change": "PP repartition 17,16,15 -> 17,17,14 (one decoder layer off the last rank)",
+  "date": "2026-10-30",
+  "mechanism": "native vLLM env VLLM_PP_LAYER_PARTITION via the launcher's existing PP_PARTITION knob (line 42 default changed; no code patch)",
+  "motivation": "after the PPMissingLayer fix, PP2 still binds the KV pool by raw bytes (target head + mtp-fp8 draft + W4A16 draft head live there); moving one layer to the roomiest rank (PP1) raises the binding budget",
+  "layer_moved": "index 33 (linear_attention), PP1 now layers 17..33, PP2 now 34..47",
+  "per_rank_consumed_gib": {"before": {"PP0": 29.56, "PP1": 27.96, "PP2": 32.33}, "after": {"PP0": 29.56, "PP1": 29.45, "PP2": 30.79}},
+  "kv_in_use_gib": {"before": {"PP0": 28.67, "PP1": 30.36, "PP2": 25.79}, "after": {"PP0": 28.67, "PP1": 28.87, "PP2": 27.34}},
+  "kv_pool_tokens": {"before": 4918956, "after": 5214494},
+  "kv_pool_x": {"before": 4.69, "after": 4.97},
+  "pool_gain": "+6.0% (+295,538 tokens)",
+  "fit_into_requested_after_gib": {"PP0": 28.35, "PP1": 28.55, "PP2": 26.89},
+  "binder_after": "still PP2 (26.89); next step would be 17,18,13 but that hits PP0's ceiling 28.35 and unbalances decode compute - not recommended",
+  "decode_note": "max layers per rank unchanged (17: PP0 before, PP1 now); PP2 lighter (14L + draft + verify) - step time neutral to slightly better",
+  "boot_time_s": 236,
+  "banners": ["Qwen4Exp PP int8 handoff ACTIVE", "MTP draft lm_head built as W4A16 GPTQ-Marlin head", "FN12 mixed-step prefill cap: 864 tokens", "speculative mtp-fp8 num_spec 3"],
+  "gates": {
+    "needle_fresh_context": "PASS (KILO-4429-ZR, 1.9s)",
+    "decode_short_prompt": "108 tok/s incl. TTFT (effort low) - in band",
+    "acceptance_fresh_boot": "2.53 tokens/step (band 2.35-2.64)"
+  },
+  "traps": [
+    "launcher already had a PP_PARTITION knob (line 42, default 17,16,15 - clee's intentional balance; get_pp_indices logs nothing when the env is set, so 'no unevenly-partitioned message' does NOT mean 16/16/16",
+    "remote-patching the launcher: a double backslash in the docker-run continuation line -> 'docker: invalid reference format', boot dies before container creation; fixed by reverting to the backup and editing the existing knob"
+  ],
+  "rollback": "PP_PARTITION=17,16,15 ./run-qwen38fn.sh"
+}
