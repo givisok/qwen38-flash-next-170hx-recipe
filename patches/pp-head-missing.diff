@@ -1,0 +1,33 @@
+--- a/vllm/models/qwen4_exp/nvidia/model.py
++++ b/vllm/models/qwen4_exp/nvidia/model.py
+@@ -59,6 +59,7 @@
+ )
+ from vllm.model_executor.models.utils import (
+     AutoWeightsLoader,
++    PPMissingLayer,
+     StageMissingLayer,
+     WeightsMapper,
+     _merge_multimodal_embeddings,
+@@ -737,11 +738,17 @@
+         self.model = Qwen4ExpModel(
+             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+         )
+-        self.lm_head = ParallelLMHead(
+-            config.vocab_size,
+-            config.hidden_size,
+-            prefix=maybe_prefix(prefix, "lm_head"),
+-        )
++        if get_pp_group().is_last_rank:
++            self.lm_head = ParallelLMHead(
++                config.vocab_size,
++                config.hidden_size,
++                prefix=maybe_prefix(prefix, "lm_head"),
++            )
++        else:
++            # Non-last PP stages never compute logits: a real head here is
++            # 1.27 GiB of dead weight per rank (upstream and Morrowmake
++            # f2815b1 build a PPMissingLayer placeholder instead).
++            self.lm_head = PPMissingLayer()
+         self.logits_processor = LogitsProcessor(config.vocab_size)
+         self.make_empty_intermediate_tensors = (
+             self.model.make_empty_intermediate_tensors

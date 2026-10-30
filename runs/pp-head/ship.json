@@ -1,0 +1,25 @@
+{
+  "change": "PPMissingLayer for target lm_head on non-last PP stages (Morrowmake f2815b1 analog / newer upstream behavior)",
+  "date": "2026-10-30",
+  "patch": "patches/pp-head-missing.diff",
+  "backup": "model.py.bak-pre-pphead (fork tree)",
+  "motivation": "fork built a full BF16 ParallelLMHead 248320x2560 (~1.27 GiB) on every PP rank; non-last stages never compute logits. enable_qwen4_exp_low_latency_gemm also warmed the dead heads.",
+  "per_rank": {
+    "before": {"PP0": {"consumed_gib": 30.73, "kv_in_use_gib": 27.50}, "PP1": {"consumed_gib": 29.13, "kv_in_use_gib": 29.19}, "PP2": {"consumed_gib": 32.33, "kv_in_use_gib": 25.79}},
+    "after":  {"PP0": {"consumed_gib": 29.56, "kv_in_use_gib": 28.67}, "PP1": {"consumed_gib": 27.96, "kv_in_use_gib": 30.36}, "PP2": {"consumed_gib": 32.33, "kv_in_use_gib": 25.79}}
+  },
+  "freed_gib": {"PP0": 1.17, "PP1": 1.17},
+  "kv_pool_tokens": {"before": 4918956, "after": 4918956},
+  "kv_pool_x": {"before": 4.69, "after": 4.69},
+  "pool_verdict": "UNCHANGED: planner takes min KV bytes across ranks without per-layer normalization; binding rank is PP2 by raw bytes (25.79 GiB) both before and after. Earlier +4-5% estimate (per-layer normalization) was wrong for this engine. Freed memory now idle headroom on PP0/PP1.",
+  "layers_per_rank": [17, 16, 15],
+  "boot_time_s": 253,
+  "banners": ["Qwen4Exp PP int8 handoff ACTIVE", "MTP draft lm_head built as W4A16 GPTQ-Marlin head", "FN12 mixed-step prefill cap: 864 tokens", "speculative mtp-fp8 num_spec 3", "MARLIN WNA16 MoE backend"],
+  "gates": {
+    "needle_fresh_context": "PASS (NOVA-7731-QX retrieved, 1.9s)",
+    "decode_short_prompt": "101 tok/s incl. TTFT (effort low) - in band 102-147",
+    "acceptance_fresh_boot_small_sample": "2.35 tokens/step (band 2.35-2.64)"
+  },
+  "numerics_note": "removed head never executed on non-last ranks; outputs cannot change",
+  "next_levers_if_pool_wanted": ["gpu-memory-utilization 0.94 -> ~0.95 (PP2 'fully utilize' ceiling 28.66 GiB)", "move one decoder layer off PP2 (repartition; needs locating the split code)"]
+}
