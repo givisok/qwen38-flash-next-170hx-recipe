@@ -1,0 +1,36 @@
+{
+ "tag": "repart117",
+ "n": 6,
+ "rounds": [
+  {
+   "wall_max": 4.1,
+   "wall_all": 4.1,
+   "tokens": 1536,
+   "aggregate_tok_s": 374.8,
+   "per_stream": [
+    71.8,
+    68.7,
+    82.9,
+    83.4,
+    68.0,
+    62.5
+   ],
+   "tokens_per_step": 2.473
+  },
+  {
+   "wall_max": 3.81,
+   "wall_all": 3.82,
+   "tokens": 1536,
+   "aggregate_tok_s": 402.5,
+   "per_stream": [
+    70.7,
+    69.5,
+    88.1,
+    87.2,
+    67.1,
+    67.5
+   ],
+   "tokens_per_step": 2.476
+  }
+ ]
+}
