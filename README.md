@@ -1,167 +1,172 @@
-# Qwen3.8-Flash-Next (AWQ-g32, Uncensored) на 3× CMP 170HX — полный рецепт
+# Qwen3.8-Flash-Next (AWQ-g32, Uncensored) on 3× CMP 170HX — the full recipe
 
-Домашний LLM-стенд: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** на vLLM
-с пайплайн-параллелизмом на 3 картах **CMP 170HX (unlocked 64 ГБ, sm80/Ampere)**,
-1M-токен контекст, MTP-спекулятивный декодинг, KV-кэш fp8.
+> Main version: English. Russian version: [`README.ru.md`](README.ru.md).
 
-Рабочая точка: ~120 tok/s одиночный поток, ~45 tok/s на запрос при 16 параллельных
-(~600 tok/s агрегат), prefill до 7 900 tok/s на 79K-токенном промпте.
+Home LLM rig: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** on vLLM with
+pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)**,
+1M-token context, MTP speculative decoding, fp8 KV cache.
+
+Working point: ~120 tok/s single-stream, ~45 tok/s per request at 16 concurrent
+(~600 tok/s aggregate), prefill up to 7,900 tok/s on a 79K-token prompt.
 
 ---
 
-## 1. Источники — что и откуда бралось
+## 1. Sources — what was taken from where
 
-| Компонент | Откуда | Что взято |
+| Component | Source | What was taken |
 |---|---|---|
-| Базовый стек (форк vLLM + docker-образ + лаунчер) | [clee/qwen3.8-flash-next-3x170hx](https://github.com/clee/qwen3.8-flash-next-3x170hx) | Форк `vllm-sm80` (линейия `q38fn/stack` поверх пиннингованного nightly `7d0b4e57`), скрипт запуска, устройство PLE-стриминга с NVMe (preadv), YaRN-override, тиринг (позже отключён — см. §6) |
-| Модель (чекпоинт) | [leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32](https://huggingface.co/leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32) (~137 ГБ, 87 shards) | AWQ W4A16 **group-32** (шаг 32 выбран под ширину эксперта 640: 640/4 ранга = 160, делится на 32, но не на 128), damped GPTQ на 169K строк реальных активаций, KL 0.0214 / top-1 97.08% против BF16; PLE-таблица в **fp8** (51 ГБ вместо 95 ГБ BF16); калиброванные QSA KV-шкалы; MTP-черновик в комплекте; uncensored-база [orcarouter](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored) |
-| Тюнинг под это же семейство | [mannydelrio/qwen38-flash-next-2x-cmp170hx](https://github.com/mannydelrio/qwen38-flash-next-2x-cmp170hx) | Идея явных **cudagraph capture sizes с шагом 4** до 64 (vLLM округляет MTP-батч до (1+3)=4 токена; без этого хвост 16-поточного декода работает без графов). Их INT4-PLE (tinybeast-плагины) непереносим и не нужен: PLE и так стримится с NVMe |
-| Предыдущая модель (для сравнения/отката) | [Intel/Qwen3.8-Flash-Next-W4A16-AutoRound](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) | Работала без патчей; крупнее (169 ГБ), PLE в BF16, медленнее prefill |
-| Chat-шаблон | чекпоинт leoncca (`chat_template.jinja`) | thinking-режим, reasoning effort **xhigh/medium/low** (другие значения шаблон отвергает с 400) |
+| Base stack (vLLM fork + docker image + launcher) | [clee/qwen3.8-flash-next-3x170hx](https://github.com/clee/qwen3.8-flash-next-3x170hx) | The `vllm-sm80` fork (the `q38fn/stack` line on top of the pinned nightly `7d0b4e57`), the launch script, PLE streaming from NVMe (preadv), YaRN override, KV tiering (later disabled — see §6) |
+| Model (checkpoint) | [leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32](https://huggingface.co/leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32) (~137 GB, 87 shards) | AWQ W4A16 **group-32** (group size 32 chosen to fit the 640-wide experts: 640/4 ranks = 160, divisible by 32 but not by 128), damped GPTQ on 169K rows of real activations, KL 0.0214 / top-1 97.08% vs BF16; PLE table in **fp8** (51 GB instead of 95 GB BF16); calibrated QSA KV scales; MTP draft included; uncensored base is [orcarouter](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored) |
+| Tuning for the same model family | [mannydelrio/qwen38-flash-next-2x-cmp170hx](https://github.com/mannydelrio/qwen38-flash-next-2x-cmp170hx) | The idea of explicit **cudagraph capture sizes at stride 4** up to 64 (vLLM rounds the MTP batch up to (1+3)=4 tokens; without this, the tail of a 16-stream decode runs without graphs). Their INT4-PLE (tinybeast plugins) is unportable and unnecessary: PLE already streams from NVMe |
+| Previous model (for comparison / rollback) | [Intel/Qwen3.8-Flash-Next-W4A16-AutoRound](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) | Ran without patches; larger (169 GB), PLE in BF16, slower prefill |
+| Chat template | the leoncca checkpoint (`chat_template.jinja`) | thinking mode, reasoning effort **xhigh/medium/low** (any other value → the template rejects with 400) |
 
-Альтернативы проверены и отвергнуты: NVFP4-квант (lambsea) — требует Blackwell;
-GGUF/MLX/EXL3 — не vLLM; Mochgolf W4A16-INT8PLE — тот же размер, качество не
-измерено, проверен только в чужом SGLang-форке.
+Alternatives evaluated and rejected: NVFP4 quant (lambsea) — requires Blackwell;
+GGUF/MLX/EXL3 — not vLLM; Mochgolf W4A16-INT8PLE — same size, quality unmeasured,
+only proven in someone else's SGLang fork.
 
-## 2. Железо и контейнер
+## 2. Hardware and container
 
-- Proxmox VE, хост с 3× NVIDIA CMP 170HX (unlock до 64 ГБ = sm80), 32 ГБ RAM, NVMe 2 ТБ.
-- LXC-контейнер **CT 101** (Debian, unprivileged, `nesting=1 keyctl=1`):
-  - memory 26000, **swap: 0** (инференсу подкачка только вредит: tmpfs/KV-тир
-    начинает уходить на диск; см. §6 «своп»),
-  - проброс `/dev/nvidia0-2`, `nvidiactl`, `nvidia-uvm*`, `lxc.prlimit.memlock: unlimited`,
-  - `onboot: 1`, диск 1.4 ТБ.
-- Внутри: docker, образ `vllm-sm80:q38fn` (собран из Dockerfile репо clee поверх
-  пиннингованного nightly), дерево форка в `/root/src/vllm-sm80`, модели в
-  `/home/models` (смонтированы в контейнер read-only как `/models`).
+- Proxmox VE host with 3× NVIDIA CMP 170HX (unlocked to 64 GB = sm80), 32 GB RAM, 2 TB NVMe.
+- LXC container **CT 101** (Debian, unprivileged, `nesting=1 keyctl=1`):
+  - memory 26000, **swap: 0** (swapping only hurts inference: the tmpfs/KV tier
+    starts spilling to disk; see §6 "swap"),
+  - passthrough of `/dev/nvidia0-2`, `nvidiactl`, `nvidia-uvm*`, `lxc.prlimit.memlock: unlimited`,
+  - `onboot: 1`, 1.4 TB disk.
+- Inside: docker, image `vllm-sm80:q38fn` (built from the clee repo's Dockerfile on
+  top of the pinned nightly), the fork tree in `/root/src/vllm-sm80`, models in
+  `/home/models` (mounted into the container read-only as `/models`).
 
-## 3. Ключевые решения конфигурации
+## 3. Key configuration decisions
 
-Финальный serve-конфиг: [`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf16.yml).
+Final serve config: [`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf16.yml).
 
-| Параметр | Значение | Почему |
+| Parameter | Value | Why |
 |---|---|---|
-| `pipeline-parallel-size` | 3 | P2P между картами отключён (глюки DMA на этом железе) → TP невозможен, только PP |
-| `VLLM_PP_LAYER_PARTITION` | **17,16,15** | 48 слоёв; замер утилизации/мощности по рангам показал: у последнего ранга + MTP-черновик — он самый тяжёлый, ему меньше слоёв. Свип 16/16/16 → 17/16/15 дал +7.5% одиночного потока; 18/16/14 хуже |
-| `speculative-config` | `method: mtp, num_speculative_tokens: 3` | Черновик едет в чекпоинте; +75% одиночному потоку (120 vs 66-70 без MTP). ngram_gpu пробовали — хуже |
-| `max-num-seqs` | 16 | 8→16 подняло агрегат с 360 до ~500-600 tok/s, карты загружены на 84-100% |
-| `cudagraph_capture_sizes` | `[1,2,4,...,64]` шаг 4 | из репо mannydelrio: батч MTP округляется к 4 |
-| `kv-cache-dtype` | fp8_e4m3 | софтверная эмуляция на sm80; KV-пул 4.57M токенов |
-| `max-model-len` | 1 048 576 | YaRN ×4 от 262144 (в `hf-overrides`, + `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`), `block-size: 1728`, `rope_theta 1e7` |
-| `layer_types` override | 3× linear_attention + 1× qwen_sparse_attention ×12 | мост трансформерс-ренейминга (full_attention → indexed_attention) |
-| `NCCL_P2P_DISABLE=1` + `disable-custom-all-reduce` | | P2P виснет на этих картах |
-| `gpu-memory-utilization` | 0.94 | потолок без OOM; KV-пул 4 573 327 токенов, конкарренси 4.36× на 1M |
-| **kv-transfer-config (тиринг)** | **ОТСУТСТВУЕТ (вырезан)** | см. §6 — источник порчи KV |
+| `pipeline-parallel-size` | 3 | P2P between the cards is broken (DMA glitches on this hardware) → TP is impossible, PP only |
+| `VLLM_PP_LAYER_PARTITION` | **17,16,15** | 48 layers; per-rank utilization/power measurements showed: the last rank also carries the MTP draft — it is the heaviest, so it gets fewer layers. Sweeping 16/16/16 → 17/16/15 gave +7.5% single-stream; 18/16/14 is worse |
+| `speculative-config` | `method: mtp, num_speculative_tokens: 3` | The draft ships in the checkpoint; +75% single-stream (120 vs 66–70 without MTP). Tried ngram_gpu — worse |
+| `max-num-seqs` | 16 | 8→16 raised aggregate from 360 to ~500–600 tok/s; cards sit at 84–100% utilization |
+| `cudagraph_capture_sizes` | `[1,2,4,...,64]` step 4 | from the mannydelrio repo: the MTP batch rounds up to 4 |
+| `kv-cache-dtype` | fp8_e4m3 | software emulation on sm80; KV pool of 4.57M tokens |
+| `max-model-len` | 1,048,576 | YaRN ×4 over 262144 (in `hf-overrides`, plus `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`), `block-size: 1728`, `rope_theta 1e7` |
+| `layer_types` override | 3× linear_attention + 1× qwen_sparse_attention ×12 | bridges the transformers rename (full_attention → indexed_attention) |
+| `NCCL_P2P_DISABLE=1` + `disable-custom-all-reduce` | | P2P hangs on these cards |
+| `gpu-memory-utilization` | 0.94 | ceiling without OOM; KV pool of 4,573,327 tokens, 4.36× concurrency at 1M |
+| **kv-transfer-config (tiering)** | **ABSENT (removed)** | see §6 — the source of KV corruption |
 
-## 4. Патчи форка под этот чекпоинт (обязательны)
+## 4. Fork patches for this checkpoint (required)
 
-Лежат в [`patches/`](patches/) и вшиты в дерево `/root/src/vllm-sm80`
-(лаунчер бинд-маунтит файлы форка поверх образа):
+They live in [`patches/`](patches/) and are baked into the `/root/src/vllm-sm80`
+tree (the launcher bind-mounts the fork files over the image):
 
-1. **`mtp-weights-remap.diff`** — чекпоинт везёт QSA KV-шкалы
-   (`mtp.layers.0.self_attn.{q,k,v}_scale`). AutoWeightsLoader прогоняет их через
-   `quant_config.get_cache_scale_mapper()`, который переписывает `X.k_scale` в
-   `X.attn.k_scale` (раскладка stock-внимания) — у QSAAttention ребёнка `attn` нет →
-   краш «no module or parameter named 'attn'». Фикс: k/v → на буферы владельца
-   (`_k_scale`/`_v_scale`), q_scale отбрасывается.
-2. **`ple-fp8-staging.diff`** — PLE-стейджинг был захардкожен под BF16-строки
-   (`head_dim*2` байт). У fp8-таблицы строки `head_dim*1` = 160 Б → краш
-   320-vs-160 на первом warmup. Фикс: размер буфера от dtype таблицы, на forward
-   — вью + поэлементный деквант fp8→bf16 (кадрируемый кудаграфом kernel).
-3. **`VLLM_PLE_SYNC=1`** (env в лаунчере) — форковый код сам подозревал гонку
-   («to isolate whether the corruption is a staging race»): async-копия H2D
-   PLE-строк из pinned-памяти против старта forward. Перевод таблицы на fp8
-   сместил тайминги — гонка открылась. Sync закрывает.
-4. **`qsa-topk-tiefix.diff`** (2026-10-24, порт из
+1. **`mtp-weights-remap.diff`** — the checkpoint ships QSA KV scales
+   (`mtp.layers.0.self_attn.{q,k,v}_scale`). AutoWeightsLoader runs them through
+   `quant_config.get_cache_scale_mapper()`, which rewrites `X.k_scale` to
+   `X.attn.k_scale` (the stock-attention layout) — QSAAttention has no `attn`
+   child → crash "no module or parameter named 'attn'". Fix: k/v go to the
+   owner's buffers (`_k_scale`/`_v_scale`), q_scale is dropped.
+2. **`ple-fp8-staging.diff`** — PLE staging was hardcoded to BF16 rows
+   (`head_dim*2` bytes). The fp8 table has `head_dim*1` = 160-byte rows → a
+   320-vs-160 crash on the first warmup. Fix: buffer size derived from the table
+   dtype; in forward — a view + elementwise fp8→bf16 dequant (a
+   cudagraph-capturable kernel).
+3. **`VLLM_PLE_SYNC=1`** (env in the launcher) — the fork's own code suspected a
+   race ("to isolate whether the corruption is a staging race"): the async H2D
+   copy of PLE rows from pinned memory against the start of forward. Moving the
+   table to fp8 shifted the timings — the race opened up. Sync closes it.
+4. **`qsa-topk-tiefix.diff`** (2026-10-24, port from
    [Morrowmake/vllm-cmp170hx](https://github.com/Morrowmake/vllm-cmp170hx/tree/ampere))
-   — канонический top-k QSA-индексера. Стоковый `persistent_topk` решает
-   точные ничьи скоров на k-й границе порядком прихода атомиков → **набор
-   читаемых блоков контекста зависит от таймингов, а не от скоров**
-   (воспроизведено на наших GPU: 8/8 строк меняли выборку за 30 вызовов).
-   Фикс чинит только оспариваемые границы (ничьи → младшие индексы) и
-   сортирует строку по возрастанию тем же запуском ядра. Ручки в лаунчере:
-   `QSA_CANONICAL=1` / `QSA_SORTED=1` (по умолчанию вкл; откат
-   `QSA_CANONICAL=0 QSA_SORTED=0 ./switch-to-awq.sh` без пересборки).
-   Без регрессии скорости (A/B: ON 113 против OFF 106 tok/s медиана —
-   сортированные индексы дают лучшую локальность чтения KV). Детали и тесты:
+   — canonical top-k for the QSA indexer. The stock `persistent_topk` resolves
+   exact score ties at the k-th boundary by atomic arrival order → **the set of
+   readable context blocks depends on timing, not on scores** (reproduced on our
+   GPUs: 8/8 rows changed their selection across 30 calls). The fix repairs only
+   the disputed boundaries (ties → lower indices) and sorts each row ascending in
+   the same kernel launch. Launcher knobs: `QSA_CANONICAL=1` / `QSA_SORTED=1` (on
+   by default; rollback via `QSA_CANONICAL=0 QSA_SORTED=0 ./switch-to-awq.sh`
+   without a rebuild). No speed regression (A/B: ON 113 vs OFF 106 tok/s median —
+   sorted indices give better KV read locality). Details and tests:
    `patches/NOTES.md`, `patches/qsa-tiefix-gpu-test.py`.
-5. **`qwen4-precision.diff` + `qwen4_precision.py`** (2026-10-24, порт тех же
-   Morrowmake-переключателей точности) — **router logits FP32 включён**:
-   GateLinear tier 5 (cuBLAS bf16×bf16→fp32, работает и на sm80) даёт больше
-   разделённости скоров и меньше точных ничьих на top-10 — роутинг ближе к
-   эталону. A/B: acceptance 50.4% vs база 51.1% (в шуме бутов), скорость без
-   изменений. Второй переключатель (per-stream MTP-норма) — **выключен**:
-   acceptance просел до 48.4%, черновик откалиброван с flat-нормой.
-   Дополнительно: `VLLM_MOE_SKIP_PADDING=1` (паддинг-строки не уходят
-   экспертам) уже активен в форке по умолчанию — porting не потребовался.
-   Детали: `patches/NOTES.md`.
+5. **`qwen4-precision.diff` + `qwen4_precision.py`** (2026-10-24, port of the same
+   Morrowmake precision switches) — **router logits FP32 enabled**: GateLinear
+   tier 5 (cuBLAS bf16×bf16→fp32, works on sm80 too) gives better score separation
+   and fewer exact ties at top-10 — routing closer to the reference. A/B:
+   acceptance 50.4% vs 51.1% baseline (within boot noise), speed unchanged. The
+   second switch (per-stream MTP norm) — **disabled**: acceptance dropped to
+   48.4%; the draft is calibrated with the flat norm. Additionally:
+   `VLLM_MOE_SKIP_PADDING=1` (padding rows never reach the experts) is already on
+   by default in the fork — no port needed. Details: `patches/NOTES.md`.
 
-## 5. Запуск и операции
+## 5. Running and operations
 
 ```bash
-# на CT 101, из /root/qwen38fn
-cd /root/qwen38fn && IMAGE=vllm-sm80:q38fn FORK=/root/src/vllm-sm80 ./run-qwen38fn.sh   # запуск
-./switch-to-awq.sh    # смена модели: rm контейнера, чистка /dev/shm + kv-disk, запуск, restart-policy
-./clean-kv.sh         # лекарство от порчи KV (до отключения тиринга): вытереть kv-disk + рестарт
+# on CT 101, from /root/qwen38fn
+cd /root/qwen38fn && IMAGE=vllm-sm80:q38fn FORK=/root/src/vllm-sm80 ./run-qwen38fn.sh   # start
+./switch-to-awq.sh    # model switch: rm container, clean /dev/shm + kv-disk, start, restart-policy
+./clean-kv.sh         # the KV-corruption remedy (before tiering was disabled): wipe kv-disk + restart
 ```
 
-- Docker RestartPolicy — **unless-stopped** (иначе после выключения питания хоста
-  сервер не поднимался — главная причина «умерло после перезагрузки»).
-- Лаунчер чистит `/dev/shm/vllm_offload_*.mmap` и psm_* от прошлого килла —
-  неснесённый 8 ГБ mmap блокирует аллокацию CPU-тира.
-- Эндпоинт: `http://<ip-ct>:8080/v1`, модель зовётся `qwen3.8`. Клиенты: pi-агент
-  (`~/.pi/agent`) и Hermes Agent (CT 102, `reasoning_effort: medium` в его
-  `config.yaml`; допустимы только xhigh/medium/low — остальное шаблон отвергает).
+- Docker RestartPolicy — **unless-stopped** (otherwise the server did not come
+  back after a host power-off — the main cause of "it died after a reboot").
+- The launcher cleans `/dev/shm/vllm_offload_*.mmap` and psm_* left over from a
+  previous kill — an unremoved 8 GB mmap blocks CPU-tier allocation.
+- Endpoint: `http://<ct-ip>:8080/v1`, the model is served as `qwen3.8`. Clients:
+  the pi agent (`~/.pi/agent`) and Hermes Agent (CT 102, `reasoning_effort:
+  medium` in its `config.yaml`; only xhigh/medium/low are allowed — the template
+  rejects anything else).
 
-## 6. Грабли, на которые наступили (и их решения)
+## 6. Pitfalls we stepped on (and their fixes)
 
-1. **Своп в LXC**: у CT подкачка забивалась на 100% (4 ГБ) — KV/tmpfs уходил на
-   диск, латентность умирала. Лечение: `pct set 101 --swap 0` + `vm.swappiness=10`
-   на хосте + `swapoff -a && swapon -a` для дрена. Инференсу своп не нужен.
-2. **«Белиберда» — мультиязычный токен-суп** (`sm exit asset 资产...`):
-   - НЕ модель, НЕ шаблон, НЕ reasoning_effort. Разные жертвы по мере расследования:
-     сначала выглядело как effort=medium (маскировка: разные effort → разные хэши
-     префикса → разные блоки в тире), затем как PLE-гонка (реальная, закрыта sync).
-   - **Финальный корень: KV-оффлоад-тиринг** (OffloadingConnector: CPU 8 ГБ + NVMe
-     fs-тир) — форковый код возвращал битые блоки для многочанковых кэшированных
-     префиксов. Доказано абляцией: один и тот же промпт — 5/5 мусор с тирингом,
-     6/6 чисто без, затем 0/32 мусора в 8-поточной батарее без тиринга.
-   - Тиринг **вырезан из конфига** (текст блока сохранён в `patches/NOTES.md`). GPU-префикс-кэш
-     остался, скорость декода не изменилась (45.0 vs 44.9 tok/s на запрос).
-     Потеряно: тёплый кэш префиксов, переживший рестарт. Вернуть — только чиня
-     кандидаты из `patches/NOTES.md` (гонка lookup/eviction в fs/manager.py,
-     смещения чанков в submit_store, исключение draft-групп в spec.py).
-3. **MTP-черновик не грузился** на новом чекпоинте — патч №1 (§4).
-4. **PLE в fp8** не влезал в стейджинг — патч №2 (§4).
-5. **Чистить kv-disk при смене модели**: fs-тир адресуется по токенам, значения —
-   от старых весов (сейчас тиринг выключен, но правило помним на будущее).
-6. **OOM-стресс не роняет сервер**: 8×249K и 5×947K токенов (переподписка пула) —
-   всё в очереди, oom_kill=0; скрипт `scripts/oomtest.py`. Но именно такой churn
-   загонял тир в eviction и провоцировал п.2.
+1. **Swap in LXC**: the CT's swap was pegged at 100% (4 GB) — KV/tmpfs spilled to
+   disk, latency died. Fix: `pct set 101 --swap 0` + `vm.swappiness=10` on the
+   host + `swapoff -a && swapon -a` to drain it. Inference does not need swap.
+2. **"Word salad" — multilingual token soup** (`sm exit asset 资产...`):
+   - NOT the model, NOT the template, NOT reasoning_effort. Different suspects as
+     the investigation went: at first it looked like effort=medium (a masking
+     effect: different effort → different prefix hashes → different blocks in the
+     tier), then like the PLE race (a real one, closed with sync).
+   - **Final root cause: KV offload tiering** (OffloadingConnector: 8 GB CPU + NVMe
+     fs tier) — the fork's code returned corrupted blocks for multi-chunk cached
+     prefixes. Proven by ablation: the same prompt — 5/5 garbage with tiering,
+     6/6 clean without, then 0/32 garbage in an 8-thread battery without tiering.
+   - Tiering **removed from the config** (the block text is preserved in
+     `patches/NOTES.md`). The GPU prefix cache stays; decode speed unchanged
+     (45.0 vs 44.9 tok/s per request). Lost: the warm prefix cache surviving a
+     restart. To bring it back — only by fixing the candidates listed in
+     `patches/NOTES.md` (lookup/eviction race in fs/manager.py, chunk offsets in
+     submit_store, draft-group exclusion in spec.py).
+3. **The MTP draft wouldn't load** on the new checkpoint — patch #1 (§4).
+4. **PLE in fp8** didn't fit the staging path — patch #2 (§4).
+5. **Wipe the kv-disk when switching models**: the fs tier is addressed by tokens,
+   but the values come from the old weights (tiering is off now, but keep the rule
+   for the future).
+6. **OOM stress does not crash the server**: 8×249K and 5×947K tokens (pool
+   oversubscription) — everything queues, oom_kill=0; script `scripts/oomtest.py`.
+   But exactly this churn pushed the tier into eviction and triggered item 2.
 
-## 7. Замеры (AWQ-g32, финал, против Intel AutoRound W4A16)
+## 7. Measurements (AWQ-g32, final, vs Intel AutoRound W4A16)
 
-| Тест | Intel W4A16 | AWQ-g32 |
+| Test | Intel W4A16 | AWQ-g32 |
 |---|---|---|
-| Одиночный поток (TG) | 115–121 tok/s | 117–129 tok/s |
-| 16 параллельных, на запрос | 45.4 | 44.9–45.0 |
-| 16 параллельных, агрегат | 561 | 514–604 (шум длины генераций) |
-| Prefill холодный @79K ток. | 7 436 tok/s | 7 880–7 920 tok/s |
-| Echo (копирование текста) | 138.2 tok/s | 148.4 tok/s |
-| KV-пул GPU | 4.45M | 4.57M токенов |
-| Чекпоинт на диске | 169 ГБ | 133 ГБ (PLE 51 ГБ fp8) |
+| Single stream (TG) | 115–121 tok/s | 117–129 tok/s |
+| 16 concurrent, per request | 45.4 | 44.9–45.0 |
+| 16 concurrent, aggregate | 561 | 514–604 (generation-length noise) |
+| Cold prefill @ 79K tokens | 7,436 tok/s | 7,880–7,920 tok/s |
+| Echo (text copying) | 138.2 tok/s | 148.4 tok/s |
+| GPU KV pool | 4.45M | 4.57M tokens |
+| Checkpoint on disk | 169 GB | 133 GB (PLE 51 GB fp8) |
 
-Скрипты замеров: `scripts/verify16.sh` (параллельная нагрузка + GPU-утилизация),
-`scripts/prefill.py` (PP/TG), `scripts/oomtest.py` (стресс-память).
+Benchmark scripts: `scripts/verify16.sh` (parallel load + GPU utilization),
+`scripts/prefill.py` (PP/TG), `scripts/oomtest.py` (memory stress).
 
-## 8. Порядок воспроизведения с нуля (кратко)
+## 8. Reproducing from scratch (short version)
 
-1. Proxmox: создать CT (§2), пробросить карты, `swap 0`, поставить docker.
-2. Забрать репо clee (форк + Dockerfile), собрать `vllm-sm80:q38fn`,
-   checkout ветки `q38fn/stack` в `/root/src/vllm-sm80`.
-3. Скачать чекпоинт leoncca AWQ-g32 (137 ГБ, проверить SHA256SUMS) в
-   `/home/models/qwen38fn-awq-g32`; chat_template → в конфиги лаунчера.
-4. Наложить патчи §4, положить `configs/` и `scripts/` из этого репо.
-5. `docker update --restart unless-stopped` после первого запуска.
-6. Проверить: одиночный запрос → N=16 (`verify16.sh`) → prefill (`prefill.py`) →
-   на длинных агентских промптах с тулзами и историей (мульти-таходность!).
+1. Proxmox: create the CT (§2), pass the cards through, `swap 0`, install docker.
+2. Take the clee repo (fork + Dockerfile), build `vllm-sm80:q38fn`,
+   checkout the `q38fn/stack` branch into `/root/src/vllm-sm80`.
+3. Download the leoncca AWQ-g32 checkpoint (137 GB, verify SHA256SUMS) into
+   `/home/models/qwen38fn-awq-g32`; chat_template → into the launcher configs.
+4. Apply the §4 patches, drop in `configs/` and `scripts/` from this repo.
+5. `docker update --restart unless-stopped` after the first start.
+6. Verify: single request → N=16 (`verify16.sh`) → prefill (`prefill.py`) →
+   long agentic prompts with tools and history (multi-hour runs!).
