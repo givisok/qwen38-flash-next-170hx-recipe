@@ -170,3 +170,37 @@ Benchmark scripts: `scripts/verify16.sh` (parallel load + GPU utilization),
 5. `docker update --restart unless-stopped` after the first start.
 6. Verify: single request → N=16 (`verify16.sh`) → prefill (`prefill.py`) →
    long agentic prompts with tools and history (multi-hour runs!).
+
+## 9. Credits
+
+This recipe stands on the work of others — the starting configuration and most
+later improvements were taken from their repos/checkpoints:
+
+- **[clee](https://github.com/clee/qwen3.8-flash-next-3x170hx)** — the whole base
+  stack: the `vllm-sm80` fork (`q38fn/stack` line), the docker image, the launcher,
+  PLE streaming from NVMe, the YaRN override. Without this there would be no build.
+- **[leoncca](https://huggingface.co/leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32)**
+  — the AWQ-g32 checkpoint we serve: group-32 quant, damped GPTQ calibration, fp8
+  PLE table, calibrated QSA KV scales, the MTP draft included in it.
+- **[orcarouter](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored)**
+  — the uncensored base model behind the checkpoint.
+- **[Morrowmake](https://github.com/Morrowmake/vllm-cmp170hx/tree/ampere)** — the
+  source of two ports: the QSA top-k tie fix (`qsa-topk-tiefix.diff`) and the
+  Qwen4Exp precision switches (`qwen4-precision.diff` + `qwen4_precision.py`).
+- **[mannydelrio](https://github.com/mannydelrio/qwen38-flash-next-2x-cmp170hx)** —
+  the cudagraph capture-size lattice (stride 4 up to 64) that lets the tail of
+  MTP batches run under graphs.
+- **[g4bwy](https://github.com/g4bwy/qwen3.8-flash-next-cmp-170hx)** — the
+  prefix-cache knobs in [`TUNING-2026-10-27.md`](TUNING-2026-10-27.md) and the
+  int8 PP-handoff patch (their 0006).
+- **[AlexBrandes](https://github.com/AlexBrandes/cmp170hx-qwen38-flash-next)** —
+  the scheduler/prefill lane: the W4A16 MTP draft lm_head
+  ([`AlexBrandes/vllm@14457f89`](https://github.com/AlexBrandes/vllm/commit/14457f89))
+  and the FN12 bounded prefill beside decodes
+  ([`AlexBrandes/vllm@31208d20`](https://github.com/AlexBrandes/vllm/commit/31208d20)).
+- **[Intel](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound)** —
+  the model that ran on this hardware before, our comparison baseline.
+- **The vLLM project** — the pinned upstream nightly `7d0b4e57` that the fork is
+  built on.
+
+Thanks to all of them. Every bug introduced by these ports is ours, not theirs.

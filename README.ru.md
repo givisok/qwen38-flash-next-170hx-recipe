@@ -167,3 +167,37 @@ cd /root/qwen38fn && IMAGE=vllm-sm80:q38fn FORK=/root/src/vllm-sm80 ./run-qwen38
 5. `docker update --restart unless-stopped` после первого запуска.
 6. Проверить: одиночный запрос → N=16 (`verify16.sh`) → prefill (`prefill.py`) →
    на длинных агентских промптах с тулзами и историей (мульти-таходность!).
+
+## 9. Благодарности
+
+Рецепт стоит на чужой работе — стартовые настройки и большинство улучшений взяты
+из их репозиториев/чекпоинтов:
+
+- **[clee](https://github.com/clee/qwen3.8-flash-next-3x170hx)** — весь базовый
+  стек: форк `vllm-sm80` (линия `q38fn/stack`), docker-образ, лаунчер,
+  PLE-стриминг с NVMe, YaRN-override. Без этого не было бы самой сборки.
+- **[leoncca](https://huggingface.co/leoncca/Qwen3.8-Flash-Next-Uncensored-AWQ-g32)**
+  — крутимый AWQ-g32-чекпоинт: group-32-квант, калибровка damped GPTQ, fp8-таблица
+  PLE, калиброванные QSA KV-шкалы, идущий в комплекте черновик MTP.
+- **[orcarouter](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored)**
+  — uncensored-база, из которой сделан чекпоинт.
+- **[Morrowmake](https://github.com/Morrowmake/vllm-cmp170hx/tree/ampere)** —
+  исходник двух портов: починки ничьих в QSA top-k (`qsa-topk-tiefix.diff`) и
+  переключателей точности Qwen4Exp (`qwen4-precision.diff` + `qwen4_precision.py`).
+- **[mannydelrio](https://github.com/mannydelrio/qwen38-flash-next-2x-cmp170hx)** —
+  решётка cudagraph capture sizes (шаг 4 до 64), благодаря которой хвост
+  MTP-батчей ездит под графами.
+- **[g4bwy](https://github.com/g4bwy/qwen3.8-flash-next-cmp-170hx)** — ручки
+  prefix-cache из [`TUNING-2026-10-27.ru.md`](TUNING-2026-10-27.ru.md) и int8
+  PP-handoff (их патч 0006).
+- **[AlexBrandes](https://github.com/AlexBrandes/cmp170hx-qwen38-flash-next)** —
+  линия планировщика/префилла: W4A16 lm_head черновика MTP
+  ([`AlexBrandes/vllm@14457f89`](https://github.com/AlexBrandes/vllm/commit/14457f89))
+  и FN12 bounded prefill рядом с декодами
+  ([`AlexBrandes/vllm@31208d20`](https://github.com/AlexBrandes/vllm/commit/31208d20)).
+- **[Intel](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound)** —
+  модель, работавшая на этом железе раньше; наша точка сравнения.
+- **Проект vLLM** — пиннингованный апстрим-nightly `7d0b4e57`, поверх которого
+  собран форк.
+
+Спасибо всем. Все баги, привнесённые этими портами, — наши, не их.
