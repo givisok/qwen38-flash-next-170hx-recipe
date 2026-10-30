@@ -1,0 +1,36 @@
+{
+ "tag": "pleckpt",
+ "n": 6,
+ "rounds": [
+  {
+   "wall_max": 3.98,
+   "wall_all": 3.98,
+   "tokens": 1536,
+   "aggregate_tok_s": 386.0,
+   "per_stream": [
+    71.9,
+    67.8,
+    84.8,
+    83.0,
+    78.8,
+    64.4
+   ],
+   "tokens_per_step": 2.521
+  },
+  {
+   "wall_max": 3.88,
+   "wall_all": 3.88,
+   "tokens": 1536,
+   "aggregate_tok_s": 395.4,
+   "per_stream": [
+    73.1,
+    65.9,
+    80.7,
+    90.7,
+    66.1,
+    67.8
+   ],
+   "tokens_per_step": 2.431
+  }
+ ]
+}

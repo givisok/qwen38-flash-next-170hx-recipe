@@ -1,0 +1,348 @@
+diff --git a/vllm/models/qwen4_exp/nvidia/ple_layer.py b/vllm/models/qwen4_exp/nvidia/ple_layer.py
+--- a/ple_layer.py
++++ b/ple_layer.py
+@@ -2,7 +2,9 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """GPU-resident Qwen4Exp position-learning enhancement layers."""
+ 
++import os
+ from collections.abc import Sequence
++from dataclasses import replace
+ 
+ import torch
+ from torch import nn
+@@ -11,8 +13,12 @@
+ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+ from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+ from vllm.forward_context import get_forward_context
++from vllm.logger import init_logger
+ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+ from vllm.model_executor.layers.mamba.abstract import MambaBase
++from vllm.model_executor.layers.mamba.checkpoint import (
++    MambaPrefillCheckpointExporter,
++)
+ from vllm.model_executor.layers.mamba.mamba_utils import (
+     MambaStateDtypeCalculator,
+     MambaStateShapeCalculator,
+@@ -23,10 +29,13 @@
+     PleShortConvAttentionBackend,
+     PleShortConvAttentionMetadata,
+ )
++from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+ 
+ from ..common.ops.ple import ple_conv, ple_gate
+ from .ngram_embedding import Qwen4ExpNGramEmbedding
+ 
++logger = init_logger(__name__)
++
+ 
+ class Qwen4ExpPLEGroupedNorm(nn.Module):
+     def __init__(
+@@ -89,6 +98,10 @@
+         self.conv_kernel_size = int(config.ple_conv_kernel_size)
+         self.short_conv_dilation = int(config.ngram_size)
+         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
++        # The conv window ending at a checkpoint is a copy of its last inputs.
++        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
++            state_len=self.conv_state_len
++        )
+         self.num_spec_tokens = vllm_config.num_speculative_tokens
+         self.activation = "silu"
+         self.ple_embedding = Qwen4ExpNGramEmbedding(
+@@ -188,6 +201,41 @@
+             num_spec=self.num_spec_tokens,
+         )
+ 
++    def get_prefill_checkpoint_alignment(self) -> int | None:
++        return 1 if self.cache_config.mamba_cache_mode == "align" else None
++
++    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
++        spec = super().get_kv_cache_spec(vllm_config)
++        if (
++            os.environ.get("VLLM_PLE_PREFILL_CHECKPOINT", "1") != "1"
++            or self.get_prefill_checkpoint_alignment() is None
++            or not isinstance(spec, MambaSpec)
++        ):
++            return spec
++        # The scheduler takes internal checkpoints only when every Mamba layer
++        # can export them (PLE port of upstream #61601). The grid = the shared
++        # checkpoint alignment lcm: ours is 1 (linear layers + PLE), so the
++        # grid is the prefix-match unit (fallback: the Mamba block size).
++        cache_config = vllm_config.cache_config
++        grid = (
++            cache_config.prefix_match_unit
++            if cache_config.prefix_match_unit is not None
++            else spec.block_size
++        )
++        # Offsets are multiples of the grid, so the window holds only inputs.
++        assert grid >= self.conv_state_len
++        logger.info(
++            "PLE prefill checkpoints ON (upstream #61601 port): grid=%d, "
++            "conv_state_len=%d, num_spec=%d, layer_idx=%d",
++            grid,
++            self.conv_state_len,
++            self.num_spec_tokens,
++            self.layer_idx,
++        )
++        return replace(
++            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
++        )
++
+     def _short_conv_dilated_dispatch(
+         self,
+         inputs: torch.Tensor,
+@@ -311,6 +359,15 @@
+                 has_initial_states=has_initial_states,
+                 token_indices=token_indices_p,
+             )
++            if metadata.checkpoint is not None:
++                assert metadata.non_spec_query_start_loc is not None
++                self._checkpoint_exporter.export(
++                    metadata.checkpoint,
++                    raw_qkv=inputs,
++                    conv_state=conv_state,
++                    cu_seqlens=metadata.non_spec_query_start_loc,
++                    token_indices=non_spec_token_indices,
++                )
+         else:
+             num_decode_rows = (
+                 non_spec_token_indices.numel()
+
+diff --git a/vllm/v1/attention/backends/short_conv_attn.py b/vllm/v1/attention/backends/short_conv_attn.py
+--- a/short_conv_attn.py
++++ b/short_conv_attn.py
+@@ -6,6 +6,10 @@
+ import torch
+ 
+ from vllm.config import VllmConfig
++from vllm.model_executor.layers.mamba.checkpoint import (
++    MambaPrefillCheckpointBuilder,
++    MambaPrefillCheckpointMetadata,
++)
+ from vllm.utils.torch_utils import async_tensor_h2d
+ from vllm.v1.attention.backend import (
+     AttentionBackend,
+@@ -88,6 +92,8 @@
+     spec_token_indx: torch.Tensor | None = None
+     non_spec_token_indx: torch.Tensor | None = None
+     num_decode_draft_tokens_cpu: torch.Tensor | None = None
++    # Internal prefill checkpoints, one row per non-spec request.
++    checkpoint: MambaPrefillCheckpointMetadata | None = None
+ 
+ 
+ class PleShortConvAttentionBackend(ShortConvAttentionBackend):
+@@ -118,6 +124,9 @@
+     ) -> None:
+         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+         self.num_spec = self.num_spec_tokens
++        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
++            vllm_config, kv_cache_spec
++        )
+         self.use_full_cuda_graph = (
+             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+         )
+@@ -222,8 +231,15 @@
+                 .item()
+             )
+ 
++        checkpoint = None
++        if metadata.num_prefills > 0:
++            checkpoint = self.checkpoint_builder.build(
++                common_attn_metadata, list(range(common_attn_metadata.num_reqs))
++            )
++
+         return replace(
+             metadata,
++            checkpoint=checkpoint,
+             num_actual_tokens=common_attn_metadata.num_actual_tokens,
+             spec_query_len=self.num_spec + 1,
+             max_prefill_query_len=max_prefill_query_len,
+@@ -375,6 +391,12 @@
+                 out=non_spec_query_start_loc[1:],
+             )
+ 
++        checkpoint = None
++        if num_prefills > 0:
++            checkpoint = self.checkpoint_builder.build(
++                m, non_spec_req_idx_cpu.tolist()
++            )
++
+         # Compute the conv-state slots for the non-spec decode/prefill split.
+         if non_spec_state_indices_tensor is None:
+             state_indices_tensor = block_table_tensor[:0, 0]
+@@ -477,6 +499,7 @@
+             state_indices_tensor_p=state_indices_tensor_p,
+             state_indices_tensor_d=state_indices_tensor_d,
+             seq_lens=m.seq_lens,
++            checkpoint=checkpoint,
+         )
+ 
+     def build_for_cudagraph_capture(
+
+diff --git a/vllm/model_executor/layers/mamba/checkpoint.py b/vllm/model_executor/layers/mamba/checkpoint.py
+--- a/mamba/checkpoint.py
++++ b/mamba/checkpoint.py
+@@ -6,6 +6,8 @@
+ 
+ import torch
+ 
++from vllm.triton_utils import tl, triton
++
+ from vllm.config import VllmConfig
+ from vllm.utils.math_utils import cdiv
+ from vllm.utils.torch_utils import async_tensor_h2d
+@@ -155,15 +157,147 @@
+         )
+ 
+ 
+-class MambaPrefillCheckpointExporter(ABC):
+-    """Export a mid-prefill checkpoint into backend-specific paged states."""
++@dataclass(frozen=True)
++class MambaPrefillCheckpointExporter:
++    """Store each checkpoint's pre-convolution window and recurrent state.
++
++    The recurrent states are rows of a buffer the prefill kernel emitted;
++    ``recurrent_rows`` picks each checkpoint row's state out of it, and by
++    default row ``i`` holds checkpoint ``i``'s. Layers with only a conv state
++    pass no recurrent buffers. ``token_indices`` maps the rows' tokens, laid out
++    by ``cu_seqlens``, to their rows of ``raw_qkv``.
++    """
++
++    state_len: int | None = None
+ 
+-    @abstractmethod
+     def export(
+         self,
+         checkpoint: MambaPrefillCheckpointMetadata,
+-        *args,
+-        **kwargs,
++        *,
++        raw_qkv: torch.Tensor,
++        conv_state: torch.Tensor,
++        cu_seqlens: torch.Tensor,
++        recurrent_checkpoint: torch.Tensor | None = None,
++        recurrent_state: torch.Tensor | None = None,
++        recurrent_rows: torch.Tensor | None = None,
++        token_indices: torch.Tensor | None = None,
+     ) -> None:
+-        """Write checkpoint state into the paged cache."""
+-        raise NotImplementedError
++        state_len = (
++            self.state_len if self.state_len is not None else conv_state.shape[-1]
++        )
++        width = raw_qkv.shape[-1]
++        has_recurrent = recurrent_checkpoint is not None
++        if recurrent_checkpoint is None:
++            # Unread placeholders for the recurrent pointers.
++            recurrent_checkpoint = recurrent_state = conv_state
++            recurrent_row_size = 0
++        else:
++            assert recurrent_state is not None
++            recurrent_row_size = recurrent_checkpoint[0].numel()
++        block_size = 256
++        store_cache_checkpoints_kernel[
++            (
++                checkpoint.checkpoint_offsets.numel(),
++                triton.cdiv(max(width * state_len, recurrent_row_size), block_size),
++            )
++        ](
++            raw_qkv,
++            conv_state,
++            recurrent_checkpoint,
++            recurrent_state,
++            cu_seqlens,
++            checkpoint.checkpoint_offsets,
++            checkpoint.state_indices,
++            recurrent_rows if recurrent_rows is not None else checkpoint.state_indices,
++            token_indices if token_indices is not None else cu_seqlens,
++            raw_qkv.stride(0),
++            raw_qkv.stride(1),
++            conv_state.stride(0),
++            conv_state.stride(1),
++            conv_state.stride(2),
++            recurrent_checkpoint.stride(0),
++            recurrent_state.stride(0),
++            checkpoint.checkpoint_offsets.stride(0),
++            state_len,
++            width,
++            recurrent_row_size,
++            NULL_BLOCK_ID,
++            has_recurrent,
++            recurrent_rows is not None,
++            token_indices is not None,
++            block_size,
++        )
++
++
++@triton.jit
++def store_cache_checkpoints_kernel(
++    x_ptr,
++    conv_state_ptr,
++    recurrent_checkpoint_ptr,
++    recurrent_state_ptr,
++    query_start_loc_ptr,
++    checkpoint_offsets_ptr,
++    checkpoint_state_indices_ptr,
++    recurrent_rows_ptr,
++    token_indices_ptr,
++    x_stride_0: tl.constexpr,
++    x_stride_1: tl.constexpr,
++    state_stride_0: tl.constexpr,
++    state_stride_1: tl.constexpr,
++    state_stride_2: tl.constexpr,
++    checkpoint_stride_0: tl.constexpr,
++    recurrent_state_stride_0: tl.constexpr,
++    checkpoint_offset_stride: tl.constexpr,
++    STATE_LEN: tl.constexpr,
++    WIDTH: tl.constexpr,
++    RECURRENT_ROW_SIZE: tl.constexpr,
++    NULL_STATE_IDX: tl.constexpr,
++    HAS_RECURRENT: tl.constexpr,
++    HAS_RECURRENT_ROWS: tl.constexpr,
++    HAS_TOKEN_MAP: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    seq_idx = tl.program_id(0)
++    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
++    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx).to(tl.int64)
++    checkpoint_offset = tl.load(
++        checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
++    )
++    valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
++    valid_conv = (
++        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
++    )
++    width_idx = cols // STATE_LEN
++    history_idx = cols % STATE_LEN
++    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
++    token_idx = checkpoint_end - STATE_LEN + history_idx
++    if HAS_TOKEN_MAP:
++        token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
++    values = tl.load(
++        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
++        mask=valid_conv,
++    )
++    tl.store(
++        conv_state_ptr
++        + state_idx * state_stride_0
++        + width_idx * state_stride_1
++        + history_idx * state_stride_2,
++        values,
++        mask=valid_conv,
++    )
++
++    if HAS_RECURRENT:
++        if HAS_RECURRENT_ROWS:
++            recurrent_row = tl.load(recurrent_rows_ptr + seq_idx).to(tl.int64)
++        else:
++            recurrent_row = seq_idx.to(tl.int64)
++        valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
++        recurrent = tl.load(
++            recurrent_checkpoint_ptr + recurrent_row * checkpoint_stride_0 + cols,
++            mask=valid_recurrent,
++        )
++        tl.store(
++            recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
++            recurrent,
++            mask=valid_recurrent,
++        )
