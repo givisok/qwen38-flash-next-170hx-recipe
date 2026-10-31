@@ -123,8 +123,12 @@ tree (the launcher bind-mounts the fork files over the image):
    was wrong — see TUNING); the pool gain came from the §3 repartition instead.
 10. **`qwen4exp-dflash2-target.diff` +
     `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31, port of the inco.ai
-    DFlash 2 drafter target-side via ElectroHobo's recipe) — **DFlash 2
-    replaced MTP in production**. `Qwen4ExpModel` gains `EagleModelMixin` +
+    DFlash 2 drafter target-side via ElectroHobo's recipe) — **PARKED on the
+    `dflash2` branches (fork + kit), production rolled back to MTP**: the
+    draft KV group arrives as MLAAttentionSpec (607 blocks/req, sliding
+    window lost in the unify path) and charges ~14 GB/request, dropping the
+    pool 5,214,494 -> 1,371,442 (k=7) / 1,519,464 (k=3) tokens. The speed
+    results stand (see below); the blocker is capacity, not speed. `Qwen4ExpModel` gains `EagleModelMixin` +
     aux-state capture (completed HC state entering layers 6/16/26/36/46,
     hc-mean — exactly what inco.ai trained the drafter on); the states ride
     IntermediateTensors across PP ranks via the mixin's pack/collect; the

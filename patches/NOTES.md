@@ -129,3 +129,24 @@ distribution is lossless by construction (target verifies; drafter cannot
 change answers, only speed). Rollback: SPEC_MODE=mtp ./run-qwen38fn.sh.
 Draft KV adds a 5-layer bf16 group (block 64 in the group-size log line).
 Pool at block 3456: 1,371,442 tokens, 1.31x of 1M — same ballpark as MTP lane.
+
+## 6. DFlash 2 PARKED (2026-10-31 night) — rollback to MTP, work on dflash2 branches
+
+User decision: pool >= ~5M is worth more than the TG win tonight. Production =
+MTP again (kit 4fb257f + api-key commit 7d030c8; fork q38fn/stack-local @
+8bad2f8c86 + working-tree kit deltas). Everything dflash lives on:
+- fork branch `dflash2` @ 96556c2d0e: target-side capture (e89724a801),
+  exception-safe per-group pool-charge diag in kv_cache_utils, snapshot of
+  all working-tree kit deltas.
+- kit branch `dflash2`: lane yml (k7 block-3456 AND k3 block-1728 variants),
+  SPEC_MODE launcher knob, diag mount.
+RESUME POINT: the draft's 5 sliding layers (window 2048) enter the pool as
+MLAAttentionSpec with 607 blocks/request (~14 GB) instead of a windowed
+SlidingWindowSpec charge (~0.5 GB honest window math: 2048-1+extra+3x6912
+in-flight, ~15 blocks). Find where the SWA spec is replaced (customize_spec?
+group unify? the non-causal flag?) and the pool returns to ~5M with dflash on.
+CORRECTION to the earlier note: the "prefill -38%" claim was a methodology
+artifact (TTFT-approx probe vs the tuning notes' dedicated prefill probe);
+the same TTFT probe reads ~2.62k on BOTH the MTP and dflash lanes at 32k —
+no dflash-specific prefill regression measured.
+Also noted: speculative max_model_len cap (32768) does NOT change the charge.
