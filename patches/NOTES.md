@@ -150,3 +150,14 @@ artifact (TTFT-approx probe vs the tuning notes' dedicated prefill probe);
 the same TTFT probe reads ~2.62k on BOTH the MTP and dflash lanes at 32k —
 no dflash-specific prefill regression measured.
 Also noted: speculative max_model_len cap (32768) does NOT change the charge.
+
+## 7. Prefill probe correction (2026-11-01): no regression — probe bug
+
+The "2.62k tok/s at 32k" readings (both lanes) divided an ESTIMATED 32k-token
+filler by TTFT; the filler actually tokenizes to 54,435 tokens. Exact numbers
+with usage.prompt_tokens, MTP production lane: 13,322 tok -> 3.91-3.98k;
+54,435 tok -> 4.44-4.45k; 110,627 tok -> 4.51k tok/s — at or above the
+documented 4.24-4.29k band. Same-fillers dflash lane read the same TTFTs
+(~12.2s at 54k), so dflash had no prefill regression either. scripts/
+prefill_exact.py in this repo is the corrected probe (use prompt_tokens,
+never the char estimate).
