@@ -95,3 +95,37 @@ Residual temp=0 nondeterminism (coherent rewordings only) remains and is NOT
 this defect: other sources (MoE alignment, MTP verify, batch-shape FP
 accumulation) — Morrowmake's determinism family for those lives in their
 fork's kernels and is not ported.
+
+## 5. DFlash 2 lane (2026-10-31, patches/qwen4exp-dflash2-target.diff)
+
+TARGET-SIDE PORT (fork e89724a801): EagleModelMixin on Qwen4ExpModel with
+supports_aux_hidden_states_over_pp=True; capture = completed HC state entering
+layers 6/16/26/36/46 (prev-layer pending combine materialised out-of-place via
+that layer's mlp_hyper_connection, then hc-mean) — the input inco.ai trained
+the drafter on (their target_layer_ids [5,15,25,35,45] + vLLM's +1). PP>1:
+local aux packed into IntermediateTensors (aux_hidden_states_<slot>), mid ranks
+relay upstream slots (eagle3_utils aux_hidden_state_relay_keys), last rank
+collects remote + returns (sample_hidden_states, aux list). Boundary case
+(pipeline cut exactly at an aux layer) captured by the owning rank; a
+non-first rank never re-captures its start_layer. SupportsEagle3 on both For*
+classes; models/config.py guard accepts dflash.
+
+BOOT MATURITY LADDER (what it took, in order):
+1. assert page_size_padded >= page_size in MambaSpec — GDN state page scales
+   with 1+num_speculative_tokens (8 slots vs 4): block-size 1728 -> 3456
+   (retention 17280 stays a multiple: 5x3456).
+2. PP2 (drafter rank) fell to cudagraph_mode=NONE: auto-picked FlashInfer
+   reports UNIFORM_SINGLE_TOKEN_DECODE, FULL graphs + spec-decode need
+   UNIFORM_BATCH -> speculative-config attention_backend: FLASH_ATTN.
+3. FLASH_ATTN rejects fp8 KV on SM80 -> speculative-config kv_cache_dtype:
+   auto (draft-only bf16 KV; target keeps fp8_e4m3). ElectroHobo dodge the
+   same wall by running the whole target on bf16 KV; we keep the fp8 pool.
+
+A/B (2026-10-31, single stream, temp 0, same-day, medians): MTP-3 124.1
+(prose-style). DFlash k-sched 7/5/3: prose 129.4 (acc 31%, 3.17 tok/step);
+py-code 145.9 (41%); rust 189.0 (59%); code-edit 220.7 (63%, 5.40 tok/step).
+Same-day MTP numbers on code were ~110-124 (older batteries 106-113). Output
+distribution is lossless by construction (target verifies; drafter cannot
+change answers, only speed). Rollback: SPEC_MODE=mtp ./run-qwen38fn.sh.
+Draft KV adds a 5-layer bf16 group (block 64 in the group-size log line).
+Pool at block 3456: 1,371,442 tokens, 1.31x of 1M — same ballpark as MTP lane.

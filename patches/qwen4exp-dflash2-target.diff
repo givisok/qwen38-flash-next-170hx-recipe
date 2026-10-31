@@ -1,0 +1,317 @@
+diff --git a/vllm/model_executor/models/config.py b/vllm/model_executor/models/config.py
+index d19f7f7138..9d858ba36d 100644
+--- a/vllm/model_executor/models/config.py
++++ b/vllm/model_executor/models/config.py
+@@ -946,6 +946,7 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
+             "mtp",
+             "ngram",
+             "ngram_gpu",
++            "dflash",
+         }:
+             raise NotImplementedError(
+                 "Qwen4Exp speculative decoding supports only its native MTP "
+diff --git a/vllm/models/qwen4_exp/nvidia/model.py b/vllm/models/qwen4_exp/nvidia/model.py
+index 0ef90cafb3..dfc9da6021 100644
+--- a/vllm/models/qwen4_exp/nvidia/model.py
++++ b/vllm/models/qwen4_exp/nvidia/model.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Inference-only Qwen4Exp model."""
+ 
++import os
+ from collections.abc import Iterable
+ from itertools import islice
+ 
+@@ -11,6 +12,7 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
+ 
+ from vllm.config import VllmConfig
+ from vllm.distributed import get_pp_group
++from vllm.logger import init_logger
+ from vllm.model_executor.layers.fused_moe.utils import (
+     is_model_fused_shared_expert_compatible,
+ )
+@@ -32,10 +34,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     VocabParallelEmbedding,
+ )
+ from vllm.model_executor.models.interfaces import (
++    EagleModelMixin,
+     HasInnerState,
+     IsHybrid,
+     MixtureOfExperts,
+     MultiModalEmbeddings,
++    SupportsEagle3,
+     SupportsLoRA,
+     SupportsMRoPE,
+     SupportsPP,
+@@ -57,11 +61,11 @@ from vllm.model_executor.models.qwen3_vl import (
+ )
+ from vllm.model_executor.models.utils import (
+     AutoWeightsLoader,
++    PPMissingLayer,
+     StageMissingLayer,
+     WeightsMapper,
+     _merge_multimodal_embeddings,
+     extract_layer_index,
+-    make_empty_intermediate_tensors_factory,
+     make_layers,
+     maybe_fuse_shared_experts,
+     maybe_prefix,
+@@ -83,6 +87,8 @@ from .qsa import Qwen4ExpQSAAttention
+ # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
+ _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
+ 
++logger = init_logger(__name__)
++
+ 
+ def without_modelopt_fp4(
+     quant_config: QuantizationConfig | None,
+@@ -367,7 +373,38 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
+             moe.experts.update_expert_map()
+ 
+ 
+-class Qwen4ExpModel(nn.Module):
++def _pp_hop_quantize(
++    hidden: torch.Tensor, hc_count: int
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Per-token, per-stream symmetric int8 for the PP handoff.
++
++    Rows hold hc streams concatenated ([s0|s1|s2|s3]); each stream is scaled
++    independently so one outlier stream cannot flatten the others.
++    Ported from g4bwy/qwen3.8-flash-next-cmp-170hx patch 0006.
++    """
++    streams = hidden.reshape(hidden.shape[0], hc_count, -1)
++    scale = streams.abs().amax(dim=-1).clamp_(min=1e-6).mul_(1.0 / 127.0).float()
++    q = (streams / scale.unsqueeze(-1)).round_().clamp_(-127.0, 127.0)
++    return q.to(torch.int8).reshape(hidden.shape), scale
++
++
++def _pp_hop_dequantize(
++    q: torch.Tensor, scale: torch.Tensor, dtype: torch.dtype
++) -> torch.Tensor:
++    streams = q.reshape(q.shape[0], scale.shape[1], -1).to(
++        torch.float32
++    ) * scale.unsqueeze(-1)
++    return streams.reshape(q.shape[0], -1).to(dtype)
++
++
++class Qwen4ExpModel(nn.Module, EagleModelMixin):
++    # EAGLE3/DFlash-2 aux states cross PP ranks via the mixin's
++    # pack/collect (aux_hidden_states_<slot> keys in IntermediateTensors).
++    supports_aux_hidden_states_over_pp = True
++    # Class-level fallbacks so instances built without __init__ (unit-test
++    # harnesses) take the bf16 handoff path; __init__ sets the real values.
++    _pp_int8_hop: bool = False
++    _pp_hop_dtype: torch.dtype | None = None
+     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
+ 
+     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+@@ -378,6 +415,15 @@ class Qwen4ExpModel(nn.Module):
+             vllm_config.parallel_config.eplb_config.num_redundant_experts
+         )
+         self.vocab_size = config.vocab_size
++        self._pp_int8_hop = os.environ.get(
++            "VLLM_QWEN4EXP_PP_INT8_HOP", "0"
++        ).lower() in ("1", "true")
++        self._pp_hop_dtype = vllm_config.model_config.dtype
++        if self._pp_int8_hop:
++            logger.info_once(
++                "Qwen4Exp PP int8 handoff ACTIVE (hop bytes halved; "
++                "every pipeline stage must set VLLM_QWEN4EXP_PP_INT8_HOP=1)"
++            )
+         self._qsa_layer_ids = frozenset(
+             layer_idx
+             for layer_idx, layer_type in enumerate(config.layer_types)
+@@ -402,10 +448,6 @@ class Qwen4ExpModel(nn.Module):
+             Qwen4ExpSparseMoeBlock,
+             "mlp",
+         )
+-        intermediate_size = config.hidden_size * config.hc_count
+-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+-            ["hidden_states"], intermediate_size
+-        )
+ 
+         self.hyper_connection_mixer: GatedResidual | None
+         if get_pp_group().is_last_rank:
+@@ -448,6 +490,51 @@ class Qwen4ExpModel(nn.Module):
+     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+         return self.embed_tokens(input_ids)
+ 
++    def _aux_hidden_state(
++        self,
++        hidden_states: torch.Tensor,
++        block_output: torch.Tensor | None,
++        injection: torch.Tensor | None,
++        hc_layer: "Qwen4ExpDecoderLayer | None",
++    ) -> torch.Tensor:
++        """Completed multi-stream state entering a layer, averaged over the
++        hyper-connection streams: one [T, hidden_size] vector per token,
++        which is what the DFlash 2 drafter was trained on (completed layer
++        outputs, hc mean; port of inco.ai's capture via ElectroHobo's
++        recipe patch). A pending combine from the previous layer is
++        materialised with that layer's mlp_hyper_connection, as the
++        deepstack and PP paths do; the pending tuple itself is left for
++        the next layer to fuse."""
++        if block_output is not None:
++            assert hc_layer is not None
++            hidden_states = hc_layer.mlp_hyper_connection.combine(
++                hidden_states, block_output, injection
++            )
++        return hidden_states.unflatten(
++            -1, (self.config.hc_count, self.config.hidden_size)
++        ).mean(dim=-2)
++
++    def make_empty_intermediate_tensors(
++        self,
++        batch_size: int,
++        dtype: torch.dtype,
++        device: torch.device,
++    ) -> IntermediateTensors:
++        tensors = {
++            "hidden_states": torch.zeros(
++                (batch_size, self.config.hidden_size * self.config.hc_count),
++                dtype=torch.int8 if self._pp_int8_hop else dtype,
++                device=device,
++            )
++        }
++        if self._pp_int8_hop:
++            tensors["hidden_scale"] = torch.zeros(
++                (batch_size, self.config.hc_count),
++                dtype=torch.float32,
++                device=device,
++            )
++        return IntermediateTensors(tensors)
++
+     @staticmethod
+     def _start_layer_ple_prefetch(
+         layer: nn.Module,
+@@ -490,11 +577,31 @@ class Qwen4ExpModel(nn.Module):
+         else:
+             if intermediate_tensors is None:
+                 raise ValueError("pipeline stage requires intermediate tensors")
+-            hidden_states = intermediate_tensors["hidden_states"]
++            if self._pp_int8_hop:
++                hidden_q = intermediate_tensors["hidden_states"]
++                if hidden_q.dtype != torch.int8 or (
++                    "hidden_scale" not in intermediate_tensors.tensors
++                ):
++                    raise RuntimeError(
++                        "VLLM_QWEN4EXP_PP_INT8_HOP is set on this stage but "
++                        "the received handoff is not int8+scaled: enable the "
++                        "env on EVERY pipeline stage"
++                    )
++                hidden_states = _pp_hop_dequantize(
++                    hidden_q,
++                    intermediate_tensors["hidden_scale"],
++                    self._pp_hop_dtype,
++                )
++            else:
++                hidden_states = intermediate_tensors["hidden_states"]
++
++        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
++        aux_hidden_states: list[torch.Tensor] = []
+ 
+         block_output = None
+         injection = None
+         last_layer = None
++        prev_layer = None
+         if self.start_layer < self.end_layer:
+             self._start_layer_ple_prefetch(
+                 self.layers[self.start_layer],
+@@ -515,6 +622,16 @@ class Qwen4ExpModel(nn.Module):
+                     query_start_loc,
+                     ngram_context,
+                 )
++            if layer_idx in self.aux_hidden_state_layers and (
++                get_pp_group().is_first_rank or layer_idx != self.start_layer
++            ):
++                # State entering layer_idx; a non-first rank's
++                # start_layer was already captured upstream.
++                aux_hidden_states.append(
++                    self._aux_hidden_state(
++                        hidden_states, block_output, injection, prev_layer
++                    )
++                )
+             hidden_states, block_output, injection = layer(
+                 hidden_states=hidden_states,
+                 prev_block_output=block_output,
+@@ -547,6 +664,16 @@ class Qwen4ExpModel(nn.Module):
+                 block_output = None
+                 injection = None
+                 hidden_states = hidden_states + deepstack_embed
++            prev_layer = layer
++
++        if self.end_layer in self.aux_hidden_state_layers:
++            # Pipeline cut exactly at an aux layer: this rank owns the
++            # state entering end_layer; capture it before the wire.
++            aux_hidden_states.append(
++                self._aux_hidden_state(
++                    hidden_states, block_output, injection, prev_layer
++                )
++            )
+ 
+         if not get_pp_group().is_last_rank:
+             # PP transports one tensor, not the delayed HC tuple. Materialize
+@@ -555,7 +682,13 @@ class Qwen4ExpModel(nn.Module):
+                 hidden_states = last_layer.mlp_hyper_connection.combine(
+                     hidden_states, block_output, injection
+                 )
+-            return IntermediateTensors({"hidden_states": hidden_states})
++            intermediate = {"hidden_states": hidden_states}
++            if self._pp_int8_hop:
++                intermediate["hidden_states"], intermediate["hidden_scale"] = (
++                    _pp_hop_quantize(hidden_states, self.config.hc_count)
++                )
++            intermediate.update(self.pack_local_aux_hidden_states(aux_hidden_states))
++            return IntermediateTensors(intermediate)
+ 
+         # The final mixer consumes the last pending combine and returns both
+         # the sampled single stream and the materialized multi-stream state.
+@@ -570,6 +703,9 @@ class Qwen4ExpModel(nn.Module):
+             # this tensor is needed by the final mixer regardless).
+             num_tokens = multi_hidden.shape[0]
+             self._mtp_hidden_buffer[:num_tokens].copy_(multi_hidden)
++        aux_hidden_states = remote_aux + aux_hidden_states
++        if aux_hidden_states:
++            return sample_hidden_states, aux_hidden_states
+         return sample_hidden_states
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+@@ -624,6 +760,7 @@ class Qwen4ExpForCausalLM(
+     SupportsPP,
+     Qwen4ExpMixtureOfExperts,
+     IsHybrid,
++    SupportsEagle3,
+ ):
+     packed_modules_mapping = {
+         "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
+@@ -659,11 +796,17 @@ class Qwen4ExpForCausalLM(
+         self.model = Qwen4ExpModel(
+             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+         )
+-        self.lm_head = ParallelLMHead(
+-            config.vocab_size,
+-            config.hidden_size,
+-            prefix=maybe_prefix(prefix, "lm_head"),
+-        )
++        if get_pp_group().is_last_rank:
++            self.lm_head = ParallelLMHead(
++                config.vocab_size,
++                config.hidden_size,
++                prefix=maybe_prefix(prefix, "lm_head"),
++            )
++        else:
++            # Non-last PP stages never compute logits: a real head here is
++            # 1.27 GiB of dead weight per rank (upstream and Morrowmake
++            # f2815b1 build a PPMissingLayer placeholder instead).
++            self.lm_head = PPMissingLayer()
+         self.logits_processor = LogitsProcessor(config.vocab_size)
+         self.make_empty_intermediate_tensors = (
+             self.model.make_empty_intermediate_tensors
+@@ -870,6 +1013,7 @@ class Qwen4ExpForConditionalGeneration(
+     Qwen3_5ForConditionalGeneration,
+     HasInnerState,
+     Qwen4ExpMixtureOfExperts,
++    SupportsEagle3,
+ ):
+     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
+ 

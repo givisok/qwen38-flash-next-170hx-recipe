@@ -121,6 +121,24 @@ tree (the launcher bind-mounts the fork files over the image):
    warmup, faster checkpoint load). Note: the KV pool itself is set by the
    raw-byte minimum across ranks (a per-layer-normalized estimate of the pool gain
    was wrong — see TUNING); the pool gain came from the §3 repartition instead.
+10. **`qwen4exp-dflash2-target.diff` +
+    `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31, port of the inco.ai
+    DFlash 2 drafter target-side via ElectroHobo's recipe) — **DFlash 2
+    replaced MTP in production**. `Qwen4ExpModel` gains `EagleModelMixin` +
+    aux-state capture (completed HC state entering layers 6/16/26/36/46,
+    hc-mean — exactly what inco.ai trained the drafter on); the states ride
+    IntermediateTensors across PP ranks via the mixin's pack/collect; the
+    config guard accepts `dflash`. The dflash lane config: block-size 3456
+    (the GDN state page carries 1+7 draft slots, x2 vs MTP-3, so the padding
+    attention page doubles too), `attention_backend: FLASH_ATTN` for the
+    drafter (auto-picked FlashInfer caps at single-token CG support and drops
+    the drafter rank to cudagraph NONE = 3x slower) and draft-only
+    `kv_cache_dtype: auto` (FLASH_ATTN rejects fp8 KV on SM80; the target
+    keeps fp8_e4m3). Same-day A/B, single stream, temp 0: prose 129.4 vs
+    MTP 124.1; code 145.9-220.7 (code editing 220.7 tok/s, acceptance 63%,
+    5.4 tok/step). Rollback: `SPEC_MODE=mtp ./run-qwen38fn.sh`. Drafter:
+    `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
+    `/home/models/qwen38-dflash2-drafter`. Fork commit: e89724a801.
 
 ## 5. Running and operations
 
