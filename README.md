@@ -8,11 +8,13 @@ pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)
 
 Working point (2026-10-30, after the tuning series in
 [`TUNING-2026-10-27.md`](TUNING-2026-10-27.md), 2026-11-01 lanes in
-[`patches/NOTES.md`](patches/NOTES.md)): **production = DFlash 2 k=7** — sparkDash
-protocol single-stream **code 292–299 / prose 166–181 / structured 359 tok/s**,
-N=8 aggregate code 741 tok/s, prefix-cache resend 0.26–1.5 s at 45k context,
-KV pool 4.01M tokens (k3 variant: 5.24M), cold prefill 3.66k @13k → 4.41k @110k
-tok/s. MTP lane remains one command away (same speeds as 2026-10-30 below).
+[`patches/NOTES.md`](patches/NOTES.md)): **production = DFlash 2 k=5 + bf16
+mamba state** — sparkDash protocol single-stream **code 253–257 / prose 173 /
+structured 285 tok/s**, N=8 aggregate **code 832 / structured 1268 tok/s**
+(best of every lane tested, incl. MTP-4), prefix-cache resend 0.41 s at 95k
+context, KV pool **5.19M tokens / 4.94×** (the MTP-4 class), needle 64k AND
+120k PASS, cold prefill 3.66k @13k → 4.41k @110k tok/s. MTP lane remains one
+command away.
 
 ---
 
@@ -154,12 +156,15 @@ tree (the launcher bind-mounts the fork files over the image):
     1.59 s (was 11.7 s), grown-tail resend 0.27 s; live pi session cacheRead
     growing to 123k tokens over 28 turns.
 
-    **Lane config.** k7 (production): block 3456 (GDN page carries 1+7 draft
-    slots), chunk 10368, schedule `[[1,2,7],[3,4,5],[5,16,3]]`. Both lanes:
-    `attention_backend: FLASH_ATTN` for the drafter (auto-picked FlashInfer
-    drops the drafter rank to cudagraph NONE = 3× slower) and draft-only
-    `kv_cache_dtype: auto` (FLASH_ATTN rejects fp8 KV on SM80; the target
-    keeps fp8_e4m3).
+    **Lane config.** PRODUCTION: k=5 + `mamba-ssm-cache-dtype: bfloat16` at
+    block 1728, chunk 6912 — the bf16 GDN slot (221 KB) lets 6 slots fit the
+    1728 page (fp32 maxes at k3; k4 = 2.21 MB > the 1.77 MB page, assert), so
+    the pool stays in the MTP-4 band. k7 variant: block 3456 (1+7 fp32
+    slots), chunk 10368, schedule `[[1,2,7],[3,4,5],[5,16,3]]`, pool 4.01M.
+    All lanes: `attention_backend: FLASH_ATTN` for the drafter (auto-picked
+    FlashInfer drops the drafter rank to cudagraph NONE = 3× slower) and
+    draft-only `kv_cache_dtype: auto` (FLASH_ATTN rejects fp8 KV on SM80; the
+    target keeps fp8_e4m3).
 
     **Numbers (2026-11-01, sparkDash DecodeBench protocol replica —
     `scripts/sd_bench.py`; per-request medians, real tokens from usage).**
@@ -167,8 +172,14 @@ tree (the launcher bind-mounts the fork files over the image):
     | lane | solo code / prose / structured | N=8 code agg | pool |
     |---|---|---|---|
     | MTP-3 | 169 / 150 / 206 | 648 | 5.21M |
+    | MTP-4 | 195 / 149 / 241 | 686 | 5.16M |
     | dflash k=3 | 197 / 158 / 206 | 696 | 5.24M |
-    | **dflash k=7** | **292–299 / 166–181 / 359–360** | **741** | 4.01M |
+    | dflash k=7 | 292–299 / 152–181 / 355–360 | 707–741 | 4.01M |
+    | **dflash k=5 + bf16 mamba** | **253–257 / 173 / 285** | **832** | **5.19M** |
+
+    k5+bf16 quality gates: needle 64k and 120k PASS (`scripts/needle_deep.py`),
+    prefix cache at 95k = 0.41 s resend (95,584 / 95,600 tokens cached),
+    decode flat at 128k depth (code 269 tok/s), acceptance 60.6% / 4.03 tok/step.
 
     Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
     speculation gains die with batch; the lanes differ at light load, where
@@ -259,20 +270,22 @@ head fix, PP repartition — every step with A/B data in
 | GPU KV pool | 4.57M / 4.36× | **5,214,494 / 4.97×** |
 | MTP acceptance | 2.35–2.6 tok/step | 2.35–2.75 tok/step |
 
-Production lane (2026-11-01, DFlash 2 k=7 — sparkDash DecodeBench protocol,
-`scripts/sd_bench.py`; prefix-cache turnaround from `scripts/cache_probe.py`):
+Production lane (2026-11-01 final, DFlash 2 k=5 + bf16 mamba state — sparkDash
+DecodeBench protocol, `scripts/sd_bench.py`; cache from `scripts/cache_probe.py`):
 
-| Test | MTP-3 lane | DFlash 2 k=7 (prod) |
-|---|---|---|
-| Solo code / prose / structured (tok/s) | 169 / 150 / 206 | **292–299 / 166–181 / 359–360** |
-| Solo, battery (py/rust/edit/sql) | ~124 / ~189 / ~221 / — | 160 / 199 / 223 / 371 (4.71 tok/step) |
-| N=8 code aggregate (tok/s) | 648 | **741** |
-| N=16/32 code aggregate (chars/s) | 995 / 870 | 1043 / 860 (all lanes within noise) |
-| Prefix-cache resend, 45k prompt | 0.26–0.89 s | 0.26–1.50 s (pre-fix: 10–12 s) |
-| Prompt grown by +3k, resend | 0.27 s | 1.59 s head / 0.27 s tail (pre-fix: 11.7 / 2.5–3.0 s) |
-| Decode at 32k/64k/128k depth, code | — | 288–294 tok/s (flat) |
-| Cold prefill (exact, prompt_tokens) | 3.91k @13k, 4.44k @54k, 4.51k @110k | 3.66k @13k, 4.35–4.41k @54–110k |
-| GPU KV pool | 5.21M / 4.97× | 4.01M / 3.83× (k3 variant 5.24M / 5.00×) |
+| Test | MTP-4 lane | DFlash 2 k=7 | **DFlash 2 k=5+bf16 (prod)** |
+|---|---|---|---|
+| Solo code / prose / structured (tok/s) | 195 / 149 / 241 | 292–299 / 152–181 / 355–360 | **253–257 / 173 / 285** |
+| N=2/4 code, per-request | 159 / 138 | 245 / 228 | 213 / 175 |
+| N=8 code / structured aggregate | 686 / 1119 | 741 / 976 | **832 / 1268** |
+| Solo battery (py/rust/edit/sql) | 151 / 179* / 170* / 281* | 160 / 199 / 223 / 371 | 157 / 189 / 205 / 358 |
+| Prefix-cache resend, 45k / 95k | 0.26–0.89 s / — | 0.26–1.50 s / — | 0.9 s / **0.41 s** |
+| Decode at 32k / 128k depth, code | — | 294 / 288 (flat) | — / 269 (flat) |
+| Needle | 64k PASS | 64k PASS | **64k + 120k PASS** |
+| Cold prefill (exact, prompt_tokens) | — | 3.66k @13k, 4.35–4.41k @54–110k | same class |
+| GPU KV pool | 5.16M / 4.92× | 4.01M / 3.83× | **5.19M / 4.94×** |
+
+(*MTP-4 battery single-run, others 2-round medians.)
 
 Live pi-agent session same-day A/B (pi counts output tokens over full turn
 time, prefill included): MTP stretch median ~88 out tok/s (~130 with
