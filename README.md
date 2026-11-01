@@ -13,7 +13,14 @@ showed DFlash speculation dies at the 262,144 YaRN boundary (acc 0.01,
 flat to 1M (**1.63 acc/draft, 134 tok/s @1M**; NOTES §19–21). Below ~250k
 the retained DFlash k5 lane is faster on code (sparkDash code 253–257 vs
 195 tok/s solo, N=8 code 832 vs 686); it remains one command away
-(`SPEC_MODE=dflash`). MTP-3 = base yml.
+(`SPEC_MODE=dflash`).
+
+Why MTP-**4** is the base and not the old MTP-3 prod: same-day A/B put k=4
+strictly ahead at the same pool class (5.16M vs 5.21M, both bf16 mamba) —
+sparkDash solo code **195 vs 169**, structured **241 vs 206**, prose parity
+149 vs 150 — and the extra draft token costs nothing at depth (1.63
+acc/draft @1M, no cliff). MTP-3 (base yml `awq-1m-fp8-ssmbf16.yml`) is
+kept as a deeper rollback rung only; nothing runs it today.
 
 ---
 
