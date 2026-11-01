@@ -222,3 +222,37 @@ SWA_BLOCK_CAP=432) is the default dflash lane — pool 4.01M clears the 4M bar,
 solo is the point of a homelab box, and nothing is lost under load. Rollback
 ladder: k3 = block 1728/chunk 6912/k3 (history 0a95834..7f1ccd0), prod MTP =
 SPEC_MODE=mtp ./run-qwen38fn.sh.
+
+## 10. Verification with the sparkDash protocol (2026-11-01): my char-based
+sweep was directionally right; canonical token-based numbers CONFIRM k7
+
+The concurrency sweep in section 9 counted streamed characters (stdlib probe).
+Re-measured all three lanes with an exact replica of the sparkDash DecodeBench
+protocol (MiaAI-Lab/sparkDash @ 3e6d4ef — the protocol both AlexBrandes and
+ElectroHobo publish their numbers with): chat/completions, stream,
+include_usage, temperature 0, top_p 1, thinking off, max_tokens 400, a
+32-token warmup before each wave, decode tok/s = (completion_tokens - 1) /
+(tLast - tFirst) on content-chunk timestamps, 3 passes per level, medians.
+Replica: scripts/sd_bench.py (their prompt pools verbatim).
+
+Per-request median decode tok/s (code tasks / prose / structured=1..200):
+
+| lane | N=1 | N=8 | N=16 | N=32 |
+|---|---|---|---|---|
+| MTP-3 | 169 / 150 / 206 | 103 / 89 / 140 | 79 / 65 / 102 | 66 / 58 / 94 |
+| dflash k=3 | 197 / 158 / 206 | 110 / 89 / 139 | 84 / 66 / 103 | 63 / 58 / 94 |
+| dflash k=7 | **296 / 166 / 360** | **134 / 93 / 146** | **81 / 68 / 74** | 69 / 52 / 79 |
+
+Aggregate tok/s (sum of decode tokens over the concurrent first->last window):
+
+| lane | code N=8/16/32 | prose N=8/16/32 | structured N=8/16/32 |
+|---|---|---|---|
+| MTP | 648 / 995 / 870 | 657 / 956 / 869 | 1023 / 1507 / 1398 |
+| k=3 | 696 / 975 / 844 | 645 / 964 / 876 | 1019 / 1514 / 1430 |
+| k=7 | **782 / 1043 / 860** | **687 / 983 / 763** | 1050 / 1123 / 1155 |
+
+Verdict unchanged, now on the canonical scale: k7 wins solo massively
+(code +75% over MTP, structured +75%), wins or ties code/prose aggregate
+through N=16, and only the highly-predictable structured count-to-200 stream
+(a near-100% draft-acceptance workload) favors k3/MTP at N>=16 — exactly the
+regime where any drafter's edge dies. k7 stays the default lane.
