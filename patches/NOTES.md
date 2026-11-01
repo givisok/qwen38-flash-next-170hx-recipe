@@ -470,3 +470,34 @@ queries 2-19 must ride the prefix cache.
   and needle_deep.py's nominal "120k" run was actually ~139k tokens (its
   PASS claim only gets stronger). needle_1m.py self-calibrates: build ->
   /tokenize -> rescale -> /tokenize (converged in one iteration, +326 tok).
+
+## 19. DFlash speculation dies at 262,144 = YaRN boundary (2026-11-01 night)
+
+User saw pi at ~40 tok/s. Server-side truth: pi's counter was honest - the
+engine itself logged 30-46 tok/s generation for a SINGLE running request.
+The active session (running since Oct 31) crossed 262,144 tokens at
+20:12Z and per-turn tok/s stepped from 84-147 down to 38-42 within a
+minute and stayed there. Not the cache (hit 93.5%, cacheRead keeping up,
+only ~1k new tokens per turn), not preemption (0), not thermals
+(35-38 C, full clocks, no throttle reasons), not other clients.
+Live spec counters during the slow window: +707 drafts, +18 accepted =
+0.025 tokens/draft, vs a healthy 1.81/draft average since boot.
+Paper cause: the DFlash2 drafter config has max_position_embeddings
+262144 and rope_scaling: NONE - it has no YaRN. The target runs
+yarn x4 from original 262144. Past 262,144 the two models compute in
+incompatible positional systems; every draft is rejected; with k=5 each
+step still pays verification of 5 draft positions through the full
+context (~6x step cost for ~1 emitted token).
+Controlled probe (scripts/spec_gate_depth.py, self-calibrated filler,
+temp 1, 200 tok, spec counter deltas around each request):
+- @250,080 tok: 72 drafts / 128 accepted = 1.78 acc/draft, 127.4 tok/s
+- @270,109 tok: 199 drafts / 0 accepted = 0.00 acc/draft, 46.2 tok/s
+Exactly reproduces the pi symptom. Target quality is NOT affected -
+the 1M multi-needle gate (18) passed at 1.01M: retrieval works, only
+speculation is dead weight past the boundary.
+Mitigations: compact agent sessions below ~250k (immediate fix); a fork
+gate that skips drafting past 262144 would give plain-decode floor
+(~90-110 tok/s at that depth) instead of 46; MTP lane untested >262k
+(MTP head is part of the target network and shares its rope, so it
+plausibly survives - needs the same probe on the MTP lane before
+promising).

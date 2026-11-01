@@ -190,6 +190,16 @@ tree (the launcher bind-mounts the fork files over the image):
     cache at 1M scale — 1,007,424 / 1,010,360 tokens cached, TTFT 4.3–4.5 s
     (~52× vs cold). This is also the SWA cache fix proven at full depth.
 
+    **Boundary caveat (NOTES §19)**: target retrieval is fine to 1M, but
+    DFlash *speculation* only works ≤ 262,144 tokens — the drafter ships
+    `max_position_embeddings: 262144, rope_scaling: None` (no YaRN) while the
+    target yarns ×4. Past the boundary every draft is rejected: measured
+    1.78 acc/draft @250k vs **0.00 @270k**, decode drops to ~46 tok/s (k=5
+    verify penalty, no spec gain). Agent sessions should compact below
+    ~250k; a fork gate that skips drafting past the boundary is the proper
+    fix. MTP head shares the target's rope and may survive past 262k —
+    untested.
+
     Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
     speculation gains die with batch; the lanes differ at light load, where
     k7 dominates (+50–75 % over MTP solo). Decode at depth is flat 32k→128k
