@@ -21,12 +21,11 @@ disable-custom-all-reduce: true
 # serving geometry
 dtype: bfloat16
 max-model-len: 1048576
-# 2x the MTP lane: the GDN state page carries 1+7 draft slots under dflash k=7
-# (x2 vs MTP-3), so the attention page that pads it must double too; 3456=48x72
-# keeps every 1728-multiple (retention 17280 = 5x3456) valid.
+# k=3 lane: GDN state slots (2+3) match the MTP-3 layout, so the MTP block fits.
 block-size: 3456
 max-num-seqs: 16
-max-num-batched-tokens: 8192
+# aligned to the 1728 group block (4x); 8192 floors to 6912 and wastes 15.6%
+max-num-batched-tokens: 10368
 long-prefill-token-threshold: 2048
 gpu-memory-utilization: 0.94
 kv-cache-dtype: fp8_e4m3
@@ -62,10 +61,17 @@ speculative-config:
   # keeps FULL_AND_PIECEWISE graphs on the drafter rank.
   attention_backend: FLASH_ATTN
   # FLASH_ATTN rejects fp8 KV on SM80; give the DRAFT its own bf16 KV cache
-  # (target keeps fp8_e4m3). Draft KV = 5 layers x 8 heads x 128 x 2(KV) x 2B.
+  # (target keeps fp8_e4m3). Draft KV = 5 layers x 8 heads x 128 x 2(KV) x 2B,
+  # sliding_window 2048 -> bounded ~0.6 GB, does not scale with context.
   kv_cache_dtype: auto
-  num_speculative_tokens: 7
+  # EXPERIMENT: cap the DRAFT's model len (its attention window is 2048, so a
+  # 32k cap leaves 16x headroom) — if the draft KV group is charged by the
+  # draft's model len instead of the target's 1M, the pool should recover.
+  max_model_len: 32768
+  # k=7 lane: GDN slots (2+7) need block 3456 (2x1728; retention 17280=5x3456).
+  # k schedule by concurrency: 7 for 1-2 reqs, 5 for 3-4, 3 beyond.
   num_speculative_tokens_per_batch_size: [[1, 2, 7], [3, 4, 5], [5, 16, 3]]
+  num_speculative_tokens: 7
 
 # templates & parsers (model's own chat template mounted at /opt)
 chat-template: /opt/chat_template.jinja

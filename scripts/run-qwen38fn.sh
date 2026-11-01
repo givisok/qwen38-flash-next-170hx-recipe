@@ -39,6 +39,7 @@ verify_rev() {
 }
 verify_rev "$REQUIRED_REV" || exit 1
 verify_rev "$BASE" || exit 1
+PLE_PREFILL_CKPT=${PLE_PREFILL_CKPT:-1}  # PLE internal prefill checkpoints (upstream #61601 port): one-step incremental prefills; 0 = off (old split behavior)
 PP_PARTITION=${PP_PARTITION:-17,17,14}  # decoder layers per PP rank; 17,17,14 moves one layer off the last rank (target head+draft live there, it binds the KV pool by raw bytes); rollback: PP_PARTITION=17,16,15
 PLE_STAGED=${PLE_STAGED:-1}   # 1 = shard-direct preadv PLE (default; needs no .bin)
 PLE_MMAP=${PLE_MMAP:-0}       # 1 = legacy assembled-.bin mmap path (reference only)
@@ -47,12 +48,20 @@ QSA_CANONICAL=${QSA_CANONICAL:-1}  # 1 = QSA top-k tie fix (canonical set)
 QSA_SORTED=${QSA_SORTED:-1}    # 1 = also sort selected blocks ascending
 ROUTER_FP32=${ROUTER_FP32:-1}      # 1 = fp32 MoE router logits (Morrowmake port)
 MTP_PER_STREAM=${MTP_PER_STREAM:-0}  # 1 = per-stream MTP hidden norm (Morrowmake port)
+SPEC_MODE=${SPEC_MODE:-dflash}
+SWA_BLOCK_CAP=${SWA_BLOCK_CAP:-432}
+SWA_NO_PREFIX_CACHE=${SWA_NO_PREFIX_CACHE:-1}  # 1 = draft SWA group opts out of prefix caching (keeps fine-grained hits for the target); 0 = stock   # dflash draft SWA block tokens: 5 layers x 432 x 4096B == GDN group page (8.85MB) so the pool bytes-per-block stays at the GDN level; 0 = off         # dflash = inco.ai DFlash2 (default; A/B won) | mtp = checkpoint MTP-3
 PP_INT8_HOP=${PP_INT8_HOP:-1}        # 1 = int8 PP handoff (g4bwy patch 0006 port); A/B: PP_INT8_HOP=0 ./run-qwen38fn.sh
 MTP_DRAFT_HEAD=${MTP_DRAFT_HEAD:-1}  # 1 = W4A16 GPTQ-Marlin MTP draft lm_head (AlexBrandes 14457f89 port); A/B: MTP_DRAFT_HEAD=0 ./run-qwen38fn.sh
 MIXED_PREFILL_CHUNK=${MIXED_PREFILL_CHUNK:-864}  # FN12 bounded prefill beside decodes (AlexBrandes 31208d20 port), tokens per awaiting prompt per step; 0 = off; <block 1728 takes the sub-block path
 MODEL_DIR=${MODEL_DIR:-/home/models/qwen38fn-awq-g32}
 DRAFT_HEAD_PATH=""
 [ "$MTP_DRAFT_HEAD" = 1 ] && DRAFT_HEAD_PATH="/models/$(basename "$MODEL_DIR")/draft-lm-head-w4a16-g128.safetensors"
+
+# Speculative lane: dflash selects its own stack yml (drafter + k-schedule).
+if [ "$SPEC_MODE" = "dflash" ]; then
+  CONFIG="$PWD/configs/awq-1m-fp8-ssmbf16-dflash.yml"
+fi
 
 mkdir -p runs/triton-cache
 D=$FORK/vllm
@@ -89,6 +98,11 @@ exec docker run -d --pull=never --name "$NAME" \
   -v "$D/v1/spec_decode/llm_base_proposer.py:$V/v1/spec_decode/llm_base_proposer.py:ro" \
   -v "$D/v1/worker/gpu/spec_decode/dflash/speculator.py:$V/v1/worker/gpu/spec_decode/dflash/speculator.py:ro" \
   -v "$D/v1/worker/gpu/spec_decode/eagle/utils.py:$V/v1/worker/gpu/spec_decode/eagle/utils.py:ro" \
+  -v "$D/v1/core/kv_cache_utils.py:$V/v1/core/kv_cache_utils.py:ro" \
+  -v "$D/v1/core/kv_cache_coordinator.py:$V/v1/core/kv_cache_coordinator.py:ro" \
+  -v "$D/v1/core/block_pool.py:$V/v1/core/block_pool.py:ro" \
+  -v "$D/v1/core/single_type_kv_cache_manager.py:$V/v1/core/single_type_kv_cache_manager.py:ro" \
+  -v "$D/model_executor/layers/attention/attention.py:$V/model_executor/layers/attention/attention.py:ro" \
   -v "$D/v1/core/sched/scheduler.py:$V/v1/core/sched/scheduler.py:ro" \
   -v "$D/v1/kv_offload/tiering/fs/manager.py:$V/v1/kv_offload/tiering/fs/manager.py:ro" \
   -v "$D/v1/kv_offload/tiering/spec.py:$V/v1/kv_offload/tiering/spec.py:ro" \
@@ -106,6 +120,13 @@ exec docker run -d --pull=never --name "$NAME" \
   -e "VLLM_QWEN4EXP_PP_INT8_HOP=$PP_INT8_HOP" \
   -e "VLLM_MTP_DRAFT_HEAD_PATH=$DRAFT_HEAD_PATH" \
   -e "VLLM_MIXED_PREFILL_CHUNK=$MIXED_PREFILL_CHUNK" \
+  -e "VLLM_SWA_BLOCK_CAP=$SWA_BLOCK_CAP" \
+  -e "VLLM_SWA_NO_PREFIX_CACHE=$SWA_NO_PREFIX_CACHE" \
+  -e "VLLM_CACHE_DIAG=$CACHE_DIAG" \
+  -e "VLLM_PLE_PREFILL_CHECKPOINT=$PLE_PREFILL_CKPT" \
+  -v "$D/models/qwen4_exp/nvidia/ple_layer.py:$V/models/qwen4_exp/nvidia/ple_layer.py:ro" \
+  -v "$D/v1/attention/backends/short_conv_attn.py:$V/v1/attention/backends/short_conv_attn.py:ro" \
+  -v "$D/model_executor/layers/mamba/checkpoint.py:$V/model_executor/layers/mamba/checkpoint.py:ro" \
   -v "$PWD/configs/chat_template.jinja:/opt/chat_template.jinja:ro" \
   -e "QWEN4EXP_PLE_MODEL_DIR=/models/$(basename "$MODEL_DIR")" \
   --entrypoint vllm "$IMAGE" \
