@@ -198,3 +198,27 @@ Resulting lane (k=3, block 1728, chunk 6912, FLASH_ATTN draft, bf16 draft KV):
 
 Not promoted to production yet: N=6 aggregate still ~4% under MTP and k-sched
 (7/5/3 vs flat 3) untested at the new pool. Decision pending.
+
+## 9. Concurrency sweep N=8/16/32 (2026-11-01): all three lanes equal within
+noise at load; k7 keeps the solo crown — k7 promoted to default dflash lane
+
+Same-probe aggregate (characters/s, 32 distinct code prompts x 400 tok,
+streamed; repeat on MTP showed +/-6% noise):
+
+| lane | N=8 | N=16 | N=32 | solo TG py/rust/edit/sql | pool |
+|---|---|---|---|---|---|
+| MTP-3 | 2026 | 3140 (2951) | 3010 (2981) | ~124 / ~189 / ~221 / - | 5.21M |
+| dflash k=3 | 2027 | 3432 | 2896 | 145/167/171/258 | 5.24M |
+| dflash k=7 (7/5/3) | 2172 | 3047 | 2795 | 160/199/223/371 | 4.01M |
+
+At saturated batch all lanes sit in the same ~2.8-3.4k band (speculation
+gain dies with concurrency — schedule drops to k=3 and the verify overhead
+cancels the draft). The lanes differ where load is light: k7 wins N=8 (+7%)
+and crushes solo (+10..44% over k3, up to +80% over MTP on sql, 4.71 tok/step).
+k3's N=16 3432 was the single best cell but within 2x-noise of MTP's band.
+
+Decision: k7 (block 3456, chunk 10368, schedule [[1,2,7],[3,4,5],[5,16,3]],
+SWA_BLOCK_CAP=432) is the default dflash lane — pool 4.01M clears the 4M bar,
+solo is the point of a homelab box, and nothing is lost under load. Rollback
+ladder: k3 = block 1728/chunk 6912/k3 (history 0a95834..7f1ccd0), prod MTP =
+SPEC_MODE=mtp ./run-qwen38fn.sh.
