@@ -398,3 +398,26 @@ its 4-draft verification is cheap and near-100% accepted. Since the pool
 difference (4.01M vs 5.16M) buys 60%+ solo speed on k7 and costs nothing at
 agent-style load, dflash k7 stays production. Flip to MTP-4 for batch jobs
 that emit JSON/CSV at high concurrency.
+
+## 16. Full sweep N=1/2/4/8/16/32: dflash k7 vs MTP-4 (2026-11-01 night)
+
+Per-request median tok/s (aggregate below each):
+
+code:
+| N | k7 | MTP-4 | delta |
+|---|---|---|---|
+| 1 | 295 (295) | 195 (195) | +51% |
+| 2 | 245 (479) | 159 (313) | +54% |
+| 4 | 228 (652) | 138 (445) | +65% |
+| 8 | 108 (707) | 113 (686) | ~0 |
+| 16 | 78 (962) | 77 (978) | ~0 |
+| 32 | 67 (838) | 67 (850) | ~0 |
+
+prose: k7 152/151/110/93/64/52 vs MTP-4 149/129/108/85/61/55 — k7 ahead
+through N=4, parity after. structured: k7 355/309/211 vs 241/214/191 at
+N=1/2/4 (+32..+48%), MTP-4 ahead from N=8 (154/107/98 vs 133/93/76).
+
+The pi-with-subagents zone (N=2-4) is where dflash k7 earns its keep:
++54..65% per-request on code vs MTP-4. At N>=8 code is a tie, so the pool
+spent on the drafter costs nothing under load. Structured batch generation
+remains the only MTP-4 win. k7 stays production.
