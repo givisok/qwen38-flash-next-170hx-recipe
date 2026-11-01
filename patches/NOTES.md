@@ -291,3 +291,42 @@ health 200). prod-dflash-k7-20261101 remains the marker of the best-solo
 dflash state (bench-only); prod pointer for serving = prod-mtp-20261101.
 Solo decode wins stand: k7 296 code / 360 structured vs MTP 169/206 — use
 dflash for one-shot short-context work until the cache interaction is fixed.
+
+## 12. ROOT-CAUSED and FIXED (2026-11-01 night): the draft SWA group silently
+disabled fine-grained prefix hits for the WHOLE engine — agent turns re-prefilled
+
+Instrumented the hit machinery (VLLM_CACHE_DIAG: per-group [hit-diag] in the
+coordinator, [cache-diag] masks in managers, [hash-ins]/[hash-rm] in the pool).
+The chain, confirmed line by line in the logs:
+
+1. The draft's SlidingWindowSpec group makes partial_hash_hits_enabled()
+   return False — SlidingWindowManager has no fine-grained lookup support —
+   so the boot logs "Disabling fine-grained prefix-cache hits ..." and the
+   engine drops from 16-token hit granularity to whole 1728/3456 blocks.
+2. With block-aligned hits, MambaManager.lookup only probes full-block
+   hashes. Align-mode GDN exports its prefill states as PARTIAL/checkpoint
+   hashes (chunk boundaries) and nulls most interior blocks, so almost no
+   full-block mamba hash ever exists: request #1's lookup walked i=24..20
+   all-miss while MLA had already hit 43200.
+3. Mamba gates the reconciled min -> FINAL hit=0 -> identical resend did a
+   FULL 10-12s re-prefill. Only the second identical resend hit (decode-phase
+   caching had by then registered the boundary block). Agent turns (new
+   prompt shape every turn) always pay the miss — pi at 32k+ showed 75-90.
+
+FIX: VLLM_SWA_NO_PREFIX_CACHE=1 (fork 9eadcf0a8f, kit knob default 1) — the
+drafter's spec becomes _NonCacheableSlidingWindowSpec: the draft SWA group
+opts out of prefix caching entirely (like circular buffers). Its 2048-token
+window KV is recomputed on the resumed tail for ~free, and the fine-grained
+gate no longer trips for the target groups. Boot warning gone.
+
+cache_probe after the fix (45k random-token prompt, TTFT incl. cached):
+- k3 lane: identical resend 0.89s/43200 then 0.26s/45728 (was 10.3s/0);
+  grown-head resend 0.26s/50112 (was 11.3s/0); grown-tail 1.18-1.70s.
+- k7 lane: identical 1.44s then 0.26s; grown-head resend 1.61s/44928
+  (was 11.7s/0); grown-tail resend 0.27s/50064 (was 2.5-3.0s).
+Speeds and quality unchanged (k3: code 200 / prose 155 / structured 208
+solo; k7: 299/181/359, N=8 aggregates 741/692/1041; needle 64k PASS both).
+
+dflash is now plausibly strictly better than MTP: same cache turnaround,
++50-75% solo decode, equal concurrency. Verify with a real pi session before
+promoting; prod pointer still prod-mtp-20261101 while it brews.
