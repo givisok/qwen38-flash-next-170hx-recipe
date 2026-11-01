@@ -501,3 +501,36 @@ gate that skips drafting past 262144 would give plain-decode floor
 (MTP head is part of the target network and shares its rope, so it
 plausibly survives - needs the same probe on the MTP lane before
 promising).
+
+## 20. Full depth sweep 32k-1M (2026-11-01 night): flat until the boundary, cliff after
+
+spec_sweep_depth.py: rec-filler self-calibrated via /tokenize, prose task,
+temp 1 / top_p 0.95, 200-token decode, spec-counter deltas, quiet-check
+(waits for 0 running requests so foreign traffic cannot pollute counters).
+Prose/temp-1 protocol - absolute numbers are lower than sparkDash temp-0
+medians; the CURVE is the point.
+
+| depth (tok) | prefill tok/s | decode tok/s | acc/draft |
+|---|---|---|---|
+| 32,041 | 4,238 | 127.0 | 1.80 |
+| 64,023 | 4,360 | 108.7 | 1.40 |
+| 128,073 | 4,410 | 133.2 | 1.91 |
+| 256,145 | 4,421 | 132.4 | 1.87 |
+| 512,253 | 4,388 | 46.8 | 0.01 |
+| 1,000,566 | 4,294 | 47.2 | 0.01 |
+
+Readings:
+- Prefill is FLAT 4.24-4.41k tok/s from 32k all the way to 1M - no depth
+  penalty at all.
+- Below 262,144 decode and acceptance are flat too (109-133 tok/s,
+  1.4-1.9 acc/draft; the 64k dip is one 200-token temp-1 sample, content
+  noise, not a depth effect).
+- Above the boundary acceptance is 0.01 (1 of 198 drafts at both depths)
+  and decode is PINNED at ~47 tok/s - identical at 512k and 1M. The
+  penalty is the constant k=5 verify batch with zero accepted drafts, not
+  a context-length cost: the GDN layers are O(1)-state and only MLA reads
+  KV, so the dead-spec penalty does not grow with depth.
+- First decode measurement at 1M: 47.2 tok/s (with dead drafter). Plain
+  no-spec floor at depth is unmeasured (needs a lane change); a fork gate
+  that skips drafting past 262,144 would recover part of the ~2.8x cliff,
+  exact size TBD on the nospec lane.
