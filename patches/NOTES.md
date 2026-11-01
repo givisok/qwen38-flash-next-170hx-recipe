@@ -330,3 +330,24 @@ solo; k7: 299/181/359, N=8 aggregates 741/692/1041; needle 64k PASS both).
 dflash is now plausibly strictly better than MTP: same cache turnaround,
 +50-75% solo decode, equal concurrency. Verify with a real pi session before
 promoting; prod pointer still prod-mtp-20261101 while it brews.
+
+## 13. PROMOTED (2026-11-01 late): dflash k7 + cache fix is production
+
+Live pi session validated the fix (session 2026-10-31T21-28-01, two stretches
+on the same day): MTP stretch median out/s ~88 (out+reasoning ~130), k7+fix
+stretch ~100 (~170, peaks 186/293), cacheRead growing 72k->123k over 28 turns.
+pi's counter divides output tokens by full turn duration (prefill included) —
+honest, which is exactly why the pre-fix cache storm showed up there first.
+
+Promotion state:
+- fork q38fn/stack-local @ 3c367a58e5 (merge of dflash2-pool 9eadcf0a8f;
+  content identical to the branch, both lanes boot-tested from this tree)
+- kit main @ f248264 (merge 92dfe8d + CACHE_DIAG set -u fix)
+- serving: k7 lane (block 3456, chunk 10368, schedule 7/5/3, FLASH_ATTN
+  draft, bf16 draft KV, SWA_BLOCK_CAP=432, SWA_NO_PREFIX_CACHE=1),
+  pool 4,014,818 tokens / 3.83x
+- prod boot re-verified from main: cache probe healthy (resend 0.26-1.50s,
+  grown-head 1.59s, grown-tail 0.27s), sparkDash solo code 292 tok/s
+- rollback ladder: k3 lane = block 1728/chunk 6912/k3; MTP = SPEC_MODE=mtp
+  ./run-qwen38fn.sh (state prod-mtp-20261101)
+Tag: prod-dflash-k7-20261101 (moved to this state).
