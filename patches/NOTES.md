@@ -351,3 +351,28 @@ Promotion state:
 - rollback ladder: k3 lane = block 1728/chunk 6912/k3; MTP = SPEC_MODE=mtp
   ./run-qwen38fn.sh (state prod-mtp-20261101)
 Tag: prod-dflash-k7-20261101 (moved to this state).
+
+## 14. The "why does clee get 7M" question + MTP-4 (2026-11-01)
+
+clee/qwen3.8-flash-next-3x170hx reports "KV pool: 7.36M tokens (7.01x)".
+Reproduced the regime on our box by peeling our stack (nospec probe yml in
+the kit): MTP off -> 5,932,866 / 5.66x (+0.73M: that is the price of the
+GDN spec slots + draft weights); + VLLM_PP_LAYER_PARTITION=16,16,16 +
+mamba-ssm-cache-dtype bfloat16 -> 7,102,105 / 6.77x. So their 7M is
+"no speculative decoding + even partition + bf16 mamba state" — a
+throughput-of-decode tradeoff (their own numbers: ~74 tok/s single stream,
+no spec) that we deliberately do not make: dflash k7 gives 292-299 code
+tok/s for the pool price of 4.01M.
+
+MTP-4 tested (kit yml awq-1m-fp8-ssmbf16-mtp4.yml, graphs on a 5-lattice to
+16x(1+4)=80): boots at block 1728 (no GDN assert — slots 5 fit the fp32
+page), pool 5,163,367 / 4.92x. sparkDash solo code 182.6 / prose 152.8 /
+structured 238.8 tok/s (MTP-3: 169.3/149.6/205.9) = +8-16% over MTP-3;
+N=8 code aggregate 672 (MTP-3 648, dflash k7 741); battery acceptance 63.9%,
+3.56 tok/step, N=6 aggregate 610. MTP-4 replaces MTP-3 as the fallback lane
+default (same pool class, faster). Still well under dflash k7 solo.
+
+dflash k7 + bf16 mamba state: NO pool gain (4,012,456 / 3.83x, identical) —
+with the GDN pages halved the binding group becomes the target's MLA fp8 KV
+raw bytes; k7 also still needs block 3456 (GDN assert fires at 1728 even
+with bf16). Reverted to fp32 mamba state (known-good, validated prod).
