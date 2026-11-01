@@ -421,3 +421,29 @@ The pi-with-subagents zone (N=2-4) is where dflash k7 earns its keep:
 +54..65% per-request on code vs MTP-4. At N>=8 code is a tie, so the pool
 spent on the drafter costs nothing under load. Structured batch generation
 remains the only MTP-4 win. k7 stays production.
+
+## 17. PROMOTED (2026-11-01 final): production = dflash k=5 + bf16 mamba state
+
+The "why not k4" question led here. fp32 GDN slots: k3 (4 slots) is the max
+that fits the block-1728 page (k4 = 5 x 442KB = 2.21MB > 1.77MB, assert).
+Halving the slot with mamba-ssm-cache-dtype bfloat16 lets k=5 (6 x 221KB =
+1.33MB) fit block 1728 with margin — and lands the pool exactly in the
+user's MTP-4 target band.
+
+State: kit main @ 078b536 (dflash.yml = k5+bf16 @ block 1728, chunk 6912;
+variant copy awq-1m-fp8-ssmbf16-dflash-k5bf16.yml), fork q38fn/stack-local @
+3c367a58e5 (unchanged — config-only move). Serving pool 5,185,037 / 4.94x.
+
+Measured (same-day, sparkDash / scripts):
+- solo code 253-257 / prose 173 / structured 285 tok/s
+  (k7: 295/152/355; k3: 197/155/206; MTP-4: 195/149/241)
+- N=2/4 code per-req 213/175 (k7 245/228, MTP-4 159/138)
+- N=8 aggregates code 832 / structured 1268 / prose 672 — BEST code and
+  structured N=8 of every lane tested, incl. MTP-4 (686/1119)
+- battery acceptance 60.6%, 4.03 tok/step; decode at 128k flat (code 269)
+- bf16 GDN state quality gates: needle 64k PASS AND 120k PASS
+  (scripts/needle_deep.py — secret buried mid-120k random records, exact
+  answer); prefix cache at 95k: grown-head resend 0.41s / 95,584 of 95,600
+  tokens cached; tail resend 0.97s
+Rollback ladder: k7 lane (block 3456/fp32, tag prod-dflash-k7-20261101),
+MTP-4 (SPEC_MODE=mtp + mtp4 yml), MTP-3 (prod-mtp-20261101).
