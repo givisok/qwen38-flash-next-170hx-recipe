@@ -7,9 +7,12 @@ pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
 Working point (2026-10-30, after the tuning series in
-[`TUNING-2026-10-27.md`](TUNING-2026-10-27.md)): single-stream 105–151 tok/s
-(battery mean ~132), 6 concurrent up to **402 tok/s aggregate**, KV pool
-**5.21M tokens = 4.97×** concurrency at 1M, cold 120K prefill 3.7–4.5k tok/s.
+[`TUNING-2026-10-27.md`](TUNING-2026-10-27.md), 2026-11-01 lanes in
+[`patches/NOTES.md`](patches/NOTES.md)): **production = DFlash 2 k=7** — sparkDash
+protocol single-stream **code 292–299 / prose 166–181 / structured 359 tok/s**,
+N=8 aggregate code 741 tok/s, prefix-cache resend 0.26–1.5 s at 45k context,
+KV pool 4.01M tokens (k3 variant: 5.24M), cold prefill 3.66k @13k → 4.41k @110k
+tok/s. MTP lane remains one command away (same speeds as 2026-10-30 below).
 
 ---
 
@@ -122,46 +125,65 @@ tree (the launcher bind-mounts the fork files over the image):
    raw-byte minimum across ranks (a per-layer-normalized estimate of the pool gain
    was wrong — see TUNING); the pool gain came from the §3 repartition instead.
 10. **`qwen4exp-dflash2-target.diff` +
-    `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31 port, 2026-11-01
-    pool fix — **current default lane: dflash k=7**) — port of the inco.ai
-    DFlash 2 drafter target-side via ElectroHobo's recipe. `Qwen4ExpModel`
-    gains `EagleModelMixin` + aux-state capture (completed HC state entering
-    layers 6/16/26/36/46, hc-mean — exactly what inco.ai trained the drafter
-    on); the states ride IntermediateTensors across PP ranks via the mixin's
-    pack/collect; the config guard accepts `dflash`.
+    `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31 port → 2026-11-01
+    two fixes → **current production lane: DFlash 2 k=7**) — port of the
+    inco.ai DFlash 2 drafter target-side via ElectroHobo's recipe.
+    `Qwen4ExpModel` gains `EagleModelMixin` + aux-state capture (completed HC
+    state entering layers 6/16/26/36/46, hc-mean — exactly what inco.ai
+    trained the drafter on); the states ride IntermediateTensors across PP
+    ranks; the config guard accepts `dflash`.
 
-    **Pool collapse root cause + fix (2026-11-01).** The draft KV group was
-    honest all along (the suspected MLAAttentionSpec/606-block line is the
-    target's own group). What killed the pool: `bytes_per_block` = max over
-    groups of the summed per-layer page, and the draft's SWA block (1728 tok
-    x 4096 B/tok bf16 KV x 5 layers = 35.4 MB) quadrupled the pool block on
-    the drafter's rank (PP2): num_blocks 3492 -> 939, pool 1.45x of 1M.
-    Fix: `VLLM_SWA_BLOCK_CAP` clamp in `get_kv_cache_spec` (fork) + kit knob
-    `SWA_BLOCK_CAP=432`: the 5-layer draft group page becomes 5 x 432 x 4096
-    = 8,847,360 B == the GDN group page, so the pool block stays at the GDN
-    level on every rank. k=3 lane: pool 5,238,379 tokens / 5.00x (prod MTP:
-    5,191,201 / 4.95x).
+    **Fix 1 — pool collapse (2026-11-01).** The draft's SWA block (1728 tok ×
+    4096 B/tok bf16 KV × 5 layers = 35.4 MB) quadrupled the pool's
+    bytes-per-block on the drafter's rank: num_blocks 3492→939, pool 1.45× of
+    1M. Fix: `VLLM_SWA_BLOCK_CAP=432` — the 5-layer draft group page becomes
+    8,847,360 B == the GDN group page, pool block stays at the GDN level.
+    k3: pool 5.24M / 5.00×; k7: 4.01M / 3.83×.
 
-    Lane configs. k=3: block 1728, chunk 6912. k=7 (default): block 3456
-    (GDN state page carries 1+7 draft slots, x2), chunk 10368, schedule
-    `[[1,2,7],[3,4,5],[5,16,3]]`, pool 4.01M / 3.83x. Both:
+    **Fix 2 — prefix-cache regression (2026-11-01, found via a live pi
+    session).** The draft SWA group made `partial_hash_hits_enabled` return
+    False (SlidingWindowManager has no fine-grained lookup), dropping the
+    whole engine to block-aligned prefix hits; block-aligned Mamba lookups
+    cannot see the partial/checkpoint state hashes align-mode GDN exports, so
+    every first resend of a prompt shape re-prefilled from scratch (11–12 s at
+    45k context — agents pay it on every turn). Fix:
+    `VLLM_SWA_NO_PREFIX_CACHE=1` — the drafter group opts out of prefix
+    caching (its 2048-token window KV is recomputed on the resumed tail);
+    fine-grained hits stay enabled for the target. Verified:
+    `scripts/cache_probe.py` — identical resend 0.26–1.5 s, grown-head resend
+    1.59 s (was 11.7 s), grown-tail resend 0.27 s; live pi session cacheRead
+    growing to 123k tokens over 28 turns.
+
+    **Lane config.** k7 (production): block 3456 (GDN page carries 1+7 draft
+    slots), chunk 10368, schedule `[[1,2,7],[3,4,5],[5,16,3]]`. Both lanes:
     `attention_backend: FLASH_ATTN` for the drafter (auto-picked FlashInfer
-    caps at single-token CG support and drops the drafter rank to cudagraph
-    NONE = 3x slower) and draft-only `kv_cache_dtype: auto` (FLASH_ATTN
-    rejects fp8 KV on SM80; the target keeps fp8_e4m3).
+    drops the drafter rank to cudagraph NONE = 3× slower) and draft-only
+    `kv_cache_dtype: auto` (FLASH_ATTN rejects fp8 KV on SM80; the target
+    keeps fp8_e4m3).
 
-    Numbers (2026-11-01, same probes). Solo TG: k7 py 160 / rust 199 / edit
-    223 / sql 371 tok/s (4.71 tok/step, acceptance 52.9%) vs k3 145/167/171/
-    258 vs MTP ~124/189/221. Concurrency sweep (aggregate, chars/s): all
-    three lanes equal within +/-6% noise at N=16/32 (~2.8-3.4k); k7 wins
-    N=8 (+7%). Speculation gains die with batch — the lanes only differ at
-    light load, where k7 dominates. Prefill exact (prompt_tokens-based):
-    3.66k @13k, 4.35-4.41k @54-110k — parity with MTP. Needle 64k PASS.
+    **Numbers (2026-11-01, sparkDash DecodeBench protocol replica —
+    `scripts/sd_bench.py`; per-request medians, real tokens from usage).**
+
+    | lane | solo code / prose / structured | N=8 code agg | pool |
+    |---|---|---|---|
+    | MTP-3 | 169 / 150 / 206 | 648 | 5.21M |
+    | dflash k=3 | 197 / 158 / 206 | 696 | 5.24M |
+    | **dflash k=7** | **292–299 / 166–181 / 359–360** | **741** | 4.01M |
+
+    Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
+    speculation gains die with batch; the lanes differ at light load, where
+    k7 dominates (+50–75 % over MTP solo). Decode at depth is flat 32k→128k
+    (code 288–294 tok/s on k7). Prefill exact (prompt_tokens-based): 3.66k
+    @13k, 4.35–4.41k @54–110k — parity with MTP. Needle 64k PASS.
+
+    Production state: fork `q38fn/stack-local` @ `3c367a58e5` (content =
+    branch `dflash2-pool` @ `9eadcf0a8f`; increment diff in
+    `patches/dflash2-pool-increment.diff`), kit `main` @ `f248264`. Both
+    lanes boot-tested from this tree. Diagnostics behind `VLLM_CACHE_DIAG=1`.
     Rollback ladder: k3 = block 1728/chunk 6912/k3 (kit history 0a95834);
-    prod MTP = `SPEC_MODE=mtp ./run-qwen38fn.sh`. Drafter:
-    `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
-    `/home/models/qwen38-dflash2-drafter`. Branches `dflash2-pool`
-    (fork 4beee19d43, kit 7f1ccd0); original capture commit e89724a801.
+    MTP = `SPEC_MODE=mtp ./run-qwen38fn.sh` (state `prod-mtp-20261101`).
+    Drafter: `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
+    `/home/models/qwen38-dflash2-drafter`. Tag: `prod-dflash-k7-20261101`.
 
 ## 5. Running and operations
 
@@ -236,6 +258,25 @@ head fix, PP repartition — every step with A/B data in
 | Cold prefill 120K | ~3.7k tok/s | 3.7–4.5k tok/s (int8 hop +15–21%) |
 | GPU KV pool | 4.57M / 4.36× | **5,214,494 / 4.97×** |
 | MTP acceptance | 2.35–2.6 tok/step | 2.35–2.75 tok/step |
+
+Production lane (2026-11-01, DFlash 2 k=7 — sparkDash DecodeBench protocol,
+`scripts/sd_bench.py`; prefix-cache turnaround from `scripts/cache_probe.py`):
+
+| Test | MTP-3 lane | DFlash 2 k=7 (prod) |
+|---|---|---|
+| Solo code / prose / structured (tok/s) | 169 / 150 / 206 | **292–299 / 166–181 / 359–360** |
+| Solo, battery (py/rust/edit/sql) | ~124 / ~189 / ~221 / — | 160 / 199 / 223 / 371 (4.71 tok/step) |
+| N=8 code aggregate (tok/s) | 648 | **741** |
+| N=16/32 code aggregate (chars/s) | 995 / 870 | 1043 / 860 (all lanes within noise) |
+| Prefix-cache resend, 45k prompt | 0.26–0.89 s | 0.26–1.50 s (pre-fix: 10–12 s) |
+| Prompt grown by +3k, resend | 0.27 s | 1.59 s head / 0.27 s tail (pre-fix: 11.7 / 2.5–3.0 s) |
+| Decode at 32k/64k/128k depth, code | — | 288–294 tok/s (flat) |
+| Cold prefill (exact, prompt_tokens) | 3.91k @13k, 4.44k @54k, 4.51k @110k | 3.66k @13k, 4.35–4.41k @54–110k |
+| GPU KV pool | 5.21M / 4.97× | 4.01M / 3.83× (k3 variant 5.24M / 5.00×) |
+
+Live pi-agent session same-day A/B (pi counts output tokens over full turn
+time, prefill included): MTP stretch median ~88 out tok/s (~130 with
+reasoning), k7+fix stretch ~100 (~170, peaks 186/293).
 
 Benchmark scripts: `scripts/verify16.sh` (parallel load + GPU utilization),
 `scripts/prefill.py` (PP/TG), `scripts/oomtest.py` (memory stress);
