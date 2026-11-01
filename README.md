@@ -13,8 +13,9 @@ mamba state** — sparkDash protocol single-stream **code 253–257 / prose 173 
 structured 285 tok/s**, N=8 aggregate **code 832 / structured 1268 tok/s**
 (best of every lane tested, incl. MTP-4), prefix-cache resend 0.41 s at 95k
 context, KV pool **5.19M tokens / 4.94×** (the MTP-4 class), needle 64k AND
-120k PASS, cold prefill 3.66k @13k → 4.41k @110k tok/s. MTP lane remains one
-command away.
+120k PASS plus a full-depth **1M multi-needle 18/18** (needles at 5–95 %
+depth), cold prefill 3.66k @13k → 4.41k @110k → 4.29k @1M tok/s. MTP lane
+remains one command away.
 
 ---
 
@@ -180,6 +181,14 @@ tree (the launcher bind-mounts the fork files over the image):
     k5+bf16 quality gates: needle 64k and 120k PASS (`scripts/needle_deep.py`),
     prefix cache at 95k = 0.41 s resend (95,584 / 95,600 tokens cached),
     decode flat at 128k depth (code 269 tok/s), acceptance 60.6% / 4.03 tok/step.
+
+    Full-depth gate (`scripts/needle_1m.py`, 2026-11-01): one 1,010,326-token
+    record wall, six needles at 5/20/40/60/80/95 % depth, each asked 3× with
+    different phrasings — **18/18 PASS**, exact codes, no cross-needle leaks
+    (negative control on an absent station came back invented, not leaked).
+    Cold prefill 1.01M = 235.6 s = 4,287 tok/s; every resend rode the prefix
+    cache at 1M scale — 1,007,424 / 1,010,360 tokens cached, TTFT 4.3–4.5 s
+    (~52× vs cold). This is also the SWA cache fix proven at full depth.
 
     Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
     speculation gains die with batch; the lanes differ at light load, where

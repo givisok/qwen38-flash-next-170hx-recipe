@@ -447,3 +447,26 @@ Measured (same-day, sparkDash / scripts):
   tokens cached; tail resend 0.97s
 Rollback ladder: k7 lane (block 3456/fp32, tag prod-dflash-k7-20261101),
 MTP-4 (SPEC_MODE=mtp + mtp4 yml), MTP-3 (prod-mtp-20261101).
+
+## 18. Full-depth 1M multi-needle gate (2026-11-01): 18/18 PASS
+Question: does retrieval actually work at the full YaRN'd 1M on the prod
+k5+bf16 lane? Probe scripts/needle_1m.py: ONE 1,010,326-token wall of the
+unpredictable rec/sku filler with six needles ("secret access code for
+station X is NNNNNN") at 5/20/40/60/80/95 % depth, each asked 3 times with
+different question phrasings, plus a negative control on an absent station
+(ZULU). Doc is shared by all queries, so query 1 is the cold prefill and
+queries 2-19 must ride the prefix cache.
+- 18/18 PASS, exact six-digit codes, every depth, every phrasing. No
+  cross-needle confusion; the ZULU control answered an invented 000000
+  (format hallucination, no real code leaked).
+- Cold prefill 1,010,360 tok = 235.6 s = 4,287 tok/s — the 4.24-4.51k band
+  holds at the full 1M depth (YaRN x4 costs nothing measurable here).
+- Cache fix at full scale: every resend cached 1,007,424 / 1,010,360 tokens
+  (99.7 %), TTFT 4.3-4.5 s vs 235.6 s cold (~52x). SWA_NO_PREFIX_CACHE fix
+  validated end-to-end at 1M, not just at 95k.
+- Calibration correction: this filler is 1.5203 chars/token (measured via
+  /tokenize), NOT the 1.763 the old probes assumed. Consequences: the first
+  1M attempt 400-rejected (real size 1,160,006 > max_model_len 1,048,576);
+  and needle_deep.py's nominal "120k" run was actually ~139k tokens (its
+  PASS claim only gets stronger). needle_1m.py self-calibrates: build ->
+  /tokenize -> rescale -> /tokenize (converged in one iteration, +326 tok).
