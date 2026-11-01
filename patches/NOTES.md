@@ -534,3 +534,30 @@ Readings:
   no-spec floor at depth is unmeasured (needs a lane change); a fork gate
   that skips drafting past 262,144 would recover part of the ~2.8x cliff,
   exact size TBD on the nospec lane.
+
+## 21. Production switched to MTP-4 (2026-11-01 night) — sweep confirms no cliff
+
+User decision after the boundary discovery (19-20): switch to MTP. Lane:
+SPEC_MODE=mtp + configs/awq-1m-fp8-ssmbf16-mtp4.yml (k=4, bf16 mamba
+state, standalone mtp-fp8 draft). Pool 5,163,367 / 4.92x. Boot ~260 s.
+Same sweep (spec_sweep_depth.py, prose, temp 1, quiet-check):
+
+| depth (tok) | prefill tok/s | decode tok/s | acc/draft |
+|---|---|---|---|
+| 32,041 | 4,242 | 121.4 | 1.68 |
+| 64,023 | 4,443 | 119.9 | 1.64 |
+| 128,073 | 4,564 | 128.9 | 1.83 |
+| 256,145 | 4,597 | 135.2 | 1.90 |
+| 512,253 | 4,541 | 114.7 | 1.40 |
+| 1,000,566 | 4,469 | 134.1 | 1.63 |
+
+No cliff anywhere: the MTP head shares the target's rope, acceptance
+stays 1.4-1.9 through 1M, decode 115-135 tok/s flat (dflash k5 at the
+same depths: 46.8/47.2 with acc 0.01). Prefill is slightly FASTER than
+the dflash lane deep (4.5-4.6k vs 4.3-4.4k - the drafter's five layers
+taxed prefill ~3%). Below-boundary prose is parity (121-135 vs 109-133,
+same protocol); dflash keeps the solo-code crown (sparkDash 253-257 vs
+195) for sessions that stay under ~250k. Trade accepted: ~20% slower
+solo code below 250k in exchange for 2.8x decode at 512k-1M and no
+compaction cliff for long agent sessions. Rollback: SPEC_MODE=dflash
+(launcher default) or MTP-3 via the base yml.

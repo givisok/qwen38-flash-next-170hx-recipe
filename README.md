@@ -6,16 +6,14 @@ Home LLM rig: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** on vLLM with
 pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)**,
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
-Working point (2026-10-30, after the tuning series in
-[`TUNING-2026-10-27.md`](TUNING-2026-10-27.md), 2026-11-01 lanes in
-[`patches/NOTES.md`](patches/NOTES.md)): **production = DFlash 2 k=5 + bf16
-mamba state** — sparkDash protocol single-stream **code 253–257 / prose 173 /
-structured 285 tok/s**, N=8 aggregate **code 832 / structured 1268 tok/s**
-(best of every lane tested, incl. MTP-4), prefix-cache resend 0.41 s at 95k
-context, KV pool **5.19M tokens / 4.94×** (the MTP-4 class), needle 64k AND
-120k PASS plus a full-depth **1M multi-needle 18/18** (needles at 5–95 %
-depth), cold prefill 3.66k @13k → 4.41k @110k → 4.29k @1M tok/s. MTP lane
-remains one command away.
+Working point (2026-11-01 night): **production = MTP-4** (k=4 + bf16 mamba
+state, KV pool **5.16M tokens / 4.92×**) — chosen after the depth sweep
+showed DFlash speculation dies at the 262,144 YaRN boundary (acc 0.01,
+47 tok/s at 512k–1M) while the MTP head shares the target's rope and stays
+flat to 1M (**1.63 acc/draft, 134 tok/s @1M**; NOTES §19–21). Below ~250k
+the retained DFlash k5 lane is faster on code (sparkDash code 253–257 vs
+195 tok/s solo, N=8 code 832 vs 686); it remains one command away
+(`SPEC_MODE=dflash`). MTP-3 = base yml.
 
 ---
 
@@ -198,8 +196,9 @@ tree (the launcher bind-mounts the fork files over the image):
     past the boundary acc 0.01 and decode pinned at **~47 tok/s** (constant
     k=5 verify penalty, identical at 512k and 1M). Agent sessions should
     compact below ~250k; a fork gate that skips drafting past the boundary is
-    the proper fix. MTP head shares the target's rope and may survive past
-    262k — untested.
+    the proper fix. The MTP head shares the target's rope — sweep §21
+    confirmed it stays flat to 1M (1.63 acc/draft, 134 tok/s), and
+    production switched to MTP-4 on 2026-11-01 night for this reason.
 
     Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
     speculation gains die with batch; the lanes differ at light load, where
