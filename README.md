@@ -122,27 +122,46 @@ tree (the launcher bind-mounts the fork files over the image):
    raw-byte minimum across ranks (a per-layer-normalized estimate of the pool gain
    was wrong — see TUNING); the pool gain came from the §3 repartition instead.
 10. **`qwen4exp-dflash2-target.diff` +
-    `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31, port of the inco.ai
-    DFlash 2 drafter target-side via ElectroHobo's recipe) — **PARKED on the
-    `dflash2` branches (fork + kit), production rolled back to MTP**: the
-    draft KV group arrives as MLAAttentionSpec (607 blocks/req, sliding
-    window lost in the unify path) and charges ~14 GB/request, dropping the
-    pool 5,214,494 -> 1,371,442 (k=7) / 1,519,464 (k=3) tokens. The speed
-    results stand (see below); the blocker is capacity, not speed. `Qwen4ExpModel` gains `EagleModelMixin` +
-    aux-state capture (completed HC state entering layers 6/16/26/36/46,
-    hc-mean — exactly what inco.ai trained the drafter on); the states ride
-    IntermediateTensors across PP ranks via the mixin's pack/collect; the
-    config guard accepts `dflash`. The dflash lane config: block-size 3456
-    (the GDN state page carries 1+7 draft slots, x2 vs MTP-3, so the padding
-    attention page doubles too), `attention_backend: FLASH_ATTN` for the
-    drafter (auto-picked FlashInfer caps at single-token CG support and drops
-    the drafter rank to cudagraph NONE = 3x slower) and draft-only
-    `kv_cache_dtype: auto` (FLASH_ATTN rejects fp8 KV on SM80; the target
-    keeps fp8_e4m3). Same-day A/B, single stream, temp 0: prose 129.4 vs
-    MTP 124.1; code 145.9-220.7 (code editing 220.7 tok/s, acceptance 63%,
-    5.4 tok/step). Rollback: `SPEC_MODE=mtp ./run-qwen38fn.sh`. Drafter:
+    `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31 port, 2026-11-01
+    pool fix — **current default lane: dflash k=7**) — port of the inco.ai
+    DFlash 2 drafter target-side via ElectroHobo's recipe. `Qwen4ExpModel`
+    gains `EagleModelMixin` + aux-state capture (completed HC state entering
+    layers 6/16/26/36/46, hc-mean — exactly what inco.ai trained the drafter
+    on); the states ride IntermediateTensors across PP ranks via the mixin's
+    pack/collect; the config guard accepts `dflash`.
+
+    **Pool collapse root cause + fix (2026-11-01).** The draft KV group was
+    honest all along (the suspected MLAAttentionSpec/606-block line is the
+    target's own group). What killed the pool: `bytes_per_block` = max over
+    groups of the summed per-layer page, and the draft's SWA block (1728 tok
+    x 4096 B/tok bf16 KV x 5 layers = 35.4 MB) quadrupled the pool block on
+    the drafter's rank (PP2): num_blocks 3492 -> 939, pool 1.45x of 1M.
+    Fix: `VLLM_SWA_BLOCK_CAP` clamp in `get_kv_cache_spec` (fork) + kit knob
+    `SWA_BLOCK_CAP=432`: the 5-layer draft group page becomes 5 x 432 x 4096
+    = 8,847,360 B == the GDN group page, so the pool block stays at the GDN
+    level on every rank. k=3 lane: pool 5,238,379 tokens / 5.00x (prod MTP:
+    5,191,201 / 4.95x).
+
+    Lane configs. k=3: block 1728, chunk 6912. k=7 (default): block 3456
+    (GDN state page carries 1+7 draft slots, x2), chunk 10368, schedule
+    `[[1,2,7],[3,4,5],[5,16,3]]`, pool 4.01M / 3.83x. Both:
+    `attention_backend: FLASH_ATTN` for the drafter (auto-picked FlashInfer
+    caps at single-token CG support and drops the drafter rank to cudagraph
+    NONE = 3x slower) and draft-only `kv_cache_dtype: auto` (FLASH_ATTN
+    rejects fp8 KV on SM80; the target keeps fp8_e4m3).
+
+    Numbers (2026-11-01, same probes). Solo TG: k7 py 160 / rust 199 / edit
+    223 / sql 371 tok/s (4.71 tok/step, acceptance 52.9%) vs k3 145/167/171/
+    258 vs MTP ~124/189/221. Concurrency sweep (aggregate, chars/s): all
+    three lanes equal within +/-6% noise at N=16/32 (~2.8-3.4k); k7 wins
+    N=8 (+7%). Speculation gains die with batch — the lanes only differ at
+    light load, where k7 dominates. Prefill exact (prompt_tokens-based):
+    3.66k @13k, 4.35-4.41k @54-110k — parity with MTP. Needle 64k PASS.
+    Rollback ladder: k3 = block 1728/chunk 6912/k3 (kit history 0a95834);
+    prod MTP = `SPEC_MODE=mtp ./run-qwen38fn.sh`. Drafter:
     `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
-    `/home/models/qwen38-dflash2-drafter`. Fork commit: e89724a801.
+    `/home/models/qwen38-dflash2-drafter`. Branches `dflash2-pool`
+    (fork 4beee19d43, kit 7f1ccd0); original capture commit e89724a801.
 
 ## 5. Running and operations
 
