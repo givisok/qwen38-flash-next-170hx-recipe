@@ -256,3 +256,38 @@ Verdict unchanged, now on the canonical scale: k7 wins solo massively
 through N=16, and only the highly-predictable structured count-to-200 stream
 (a near-100% draft-acceptance workload) favors k3/MTP at N>=16 — exactly the
 regime where any drafter's edge dies. k7 stays the default lane.
+
+## 11. REGRESSION FOUND (2026-11-01 evening): DFlash lanes break prefix-cache
+turnaround — agent workloads (pi) are FASTER on MTP; prod reverted to MTP
+
+User report: pi agent at 32k+ context shows 75-90 tok/s on dflash k7 vs
+105-120 previously on MTP. Not reproducible by any single-stream decode probe:
+k7 at 45k real tokens, temp 1.0, top_p 0.95, thinking on/off, 900-token
+generations, random (non-predictable) filler: code 245-368, prose 134-155,
+thinking-answer 193-210 tok/s — all >= MTP (173-206 / 127-139 / 155-164).
+Decode-at-depth is FLAT 32k->128k on every lane.
+
+The regression is in PREFIX-CACHE turnaround (scripts/cache_probe.py; 45k
+random-token prompt, TTFT incl. cached_tokens from usage):
+
+| probe | MTP (b1728) | dflash k3 (b1728) | dflash k7 (b3456) |
+|---|---|---|---|
+| identical resend | 0.26-0.89s, cached 43.2-45.7k | run1-2: 0 cached 10.3-11.7s, run3: 0.89s | 1.41-1.45s, cached 41.5k |
+| +3k grown head, resend | 0.27s, cached 50.1k | 11.3-11.7s, cached 0 | 11.7-12.4s, cached 0 |
+| +3k grown tail | 1.16-1.63s | 1.94-2.41s | 2.55-2.99s |
+
+An agent turn = cached-prefill turnaround + decode. Per turn at 32k+ dflash
+adds +1.3..+11s of re-prefill vs MTP while saving ~1s of decode — pi's
+perceived tok/s (output tokens / wall per turn) collapses exactly as
+reported. Not block-size-dependent (k3 b1728 shows it too): the draft's
+5-layer SWA group (window 2048) participates in block hashing/eviction —
+window-bounded groups free "skipped" blocks, so the full-prefix hash never
+matches and repeated prompts re-prefill thousands of tokens. Root-cause trace
+(draft group vs prefix cache hash/evict) is the new resume point on the
+dflash2-pool branches.
+
+DECISION: production reverted to MTP (SPEC_MODE=mtp; pool 5,206,204 / 4.97x,
+health 200). prod-dflash-k7-20261101 remains the marker of the best-solo
+dflash state (bench-only); prod pointer for serving = prod-mtp-20261101.
+Solo decode wins stand: k7 296 code / 360 structured vs MTP 169/206 — use
+dflash for one-shot short-context work until the cache interaction is fixed.
