@@ -376,3 +376,25 @@ dflash k7 + bf16 mamba state: NO pool gain (4,012,456 / 3.83x, identical) —
 with the GDN pages halved the binding group becomes the target's MLA fp8 KV
 raw bytes; k7 also still needs block 3456 (GDN assert fires at 1728 even
 with bf16). Reverted to fp32 mamba state (known-good, validated prod).
+
+## 15. Fresh N=8/16/32 re-measure: dflash k7 vs MTP-4 (2026-11-01 evening)
+
+Same-hour sparkDash sweeps, aggregate tok/s (per-request medians in parens):
+
+| workload | lane | N=8 | N=16 | N=32 |
+|---|---|---|---|---|
+| code | k7 | 673 (116) | 989 (75) | 834 (66) |
+| code | MTP-4 | 693 (108) | 948 (74) | 881 (67) |
+| prose | k7 | 672 (93) | 946 (64) | 753 (50) |
+| prose | MTP-4 | 651 (86) | 921 (62) | 814 (54) |
+| structured | k7 | 981 (133) | 1074 (71) | 1095 (74) |
+| structured | MTP-4 | **1123 (154)** | **1583 (107)** | **1490 (99)** |
+
+Verdict unchanged and now measured same-hour: on CODE (what agents emit)
+the two lanes are equal within noise at every load 8..32 — per-request
+medians are within 5-8 tok/s of each other everywhere. MTP-4 pulls ahead
+only on predictable structured streams at load (+36..47% at N=16/32) where
+its 4-draft verification is cheap and near-100% accepted. Since the pool
+difference (4.01M vs 5.16M) buys 60%+ solo speed on k7 and costs nothing at
+agent-style load, dflash k7 stays production. Flip to MTP-4 for batch jobs
+that emit JSON/CSV at high concurrency.
