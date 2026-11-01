@@ -161,3 +161,40 @@ documented 4.24-4.29k band. Same-fillers dflash lane read the same TTFTs
 (~12.2s at 54k), so dflash had no prefill regression either. scripts/
 prefill_exact.py in this repo is the corrected probe (use prompt_tokens,
 never the char estimate).
+
+## 8. RESOLVED (2026-11-01): pool collapse root cause + fix — 5.24M tokens / 5.00x with dflash ON
+
+Branches `dflash2-pool` (fork 4beee19d43, kit 0a95834), created from dflash2.
+
+Full per-group + per-worker [pool-diag] showed the real mechanism — NOT the
+suspected SWA-to-MLA substitution (the MLAAttentionSpec/607-block line is the
+TARGET's own 8-layer attention group, present in the MTP lane too):
+
+- pool num_blocks = min over PP ranks of available // bytes_per_block, where
+  bytes_per_block = max over groups of the summed per-layer page of a group.
+- The draft's SlidingWindowSpec was honest (window 2048, 19 blocks/req at
+  block 1728) but its per-layer page = 1728 tok x 4096 B (8 KV heads x 128 x
+  2 x bf16) = 7,077,888 B, so the 5-layer draft group summed to 35,389,440 B
+  on PP2 (the drafter's rank) — 4x the GDN group's 8,847,360 B.
+- PP2 bytes_per_block 8.85MB -> 35.4MB cut num_blocks 3492 -> 939, and the
+  shared min collapsed the whole pool to 1,519,464 tokens / 1.45x.
+
+Fix: `VLLM_SWA_BLOCK_CAP` env clamp in
+model_executor/layers/attention/attention.py::get_kv_cache_spec (limits the
+SWA block after _largest_kernel_block_within). Set to 432 in the kit launcher
+(SWA_BLOCK_CAP knob, default 432, dflash lane): draft group page becomes
+5 x 432 x 4096 = 8,847,360 B == the GDN group page, so bytes_per_block stays
+at the GDN level on every rank. Draft charge rises 19 -> 70 blocks/req
+(window 2048 + 3x6912 in-flight over a 432-token block) — cheap.
+
+Resulting lane (k=3, block 1728, chunk 6912, FLASH_ATTN draft, bf16 draft KV):
+- pool 5,238,379 tokens / 5.00x (prod MTP: 5,191,201 / 4.95x) — dflash now
+  FREE on pool, slightly ahead of MTP.
+- battery 2026-11-01: solo TG py 145.3 / rust 166.5 / edit 170.8 / sql 257.9
+  tok/s; acceptance 73.9%, 3.22 tok/step; N=6 aggregate 566 tok/s (same-probe
+  MTP: 587); needle 64k PASS; greedy non-identical (pre-existing).
+- prefill exact: 13,385 tok -> 3.66-3.68k; 54,112-54,435 -> 4.35-4.39k;
+  110,627 -> 4.41k tok/s — parity with the MTP lane.
+
+Not promoted to production yet: N=6 aggregate still ~4% under MTP and k-sched
+(7/5/3 vs flat 3) untested at the new pool. Decision pending.
