@@ -183,9 +183,14 @@ tree (the launcher bind-mounts the fork files over the image):
     |---|---|---|---|
     | MTP-3 | 169 / 150 / 206 | 648 | 5.21M |
     | MTP-4 | 195 / 149 / 241 | 686 | 5.16M |
-    | dflash k=3 | 197 / 158 / 206 | 696 | 5.24M |
-    | dflash k=7 | 292–299 / 152–181 / 355–360 | 707–741 | 4.01M |
-    | **dflash k=5 + bf16 mamba** | **253–257 / 173 / 285** | **832** | **5.19M** |
+    | dflash k=3 † | 197 / 158 / 206 | 696 | 5.24M |
+    | dflash k=7 † | 292–299 / 152–181 / 355–360 | 707–741 | 4.01M |
+    | **dflash k=5 + bf16 mamba** † | **253–257 / 173 / 285** | **832** | **5.19M** |
+
+    † dflash numbers are for depths **≤ 262,144 only**: past the YaRN boundary
+    the drafter stops speculating usefully (no `rope_scaling` — acceptance
+    0.01, decode pinned at ~47 tok/s at 512k–1M; see the boundary caveat
+    below). The MTP lanes share the target's rope and stay flat to 1M.
 
     2026-11-02: production MTP-4 raised to `gpu-memory-utilization: 0.95`
     → pool **5.28M / 5.04×** (llm-assay A/B, no regressions; `runs/gmu095/`).
