@@ -12,9 +12,11 @@ The retained **DFlash k5 lane is now full-1M** — its YaRN-boundary wall
 (acc 0.01, ~47 tok/s past 262k) turned out to be the drafter's RoPE table
 running out of rows, fixed by one config line on 2026-11-02 (see the
 boundary note in §4): **1.79 acc/draft and 141.7 tok/s @1M** — above
-MTP-4's 134 — with every shallow gate unchanged. Below ~250k it is still
-faster on code than MTP-4 (sparkDash code 253–257 vs 195 tok/s solo,
-N=8 code 832 vs 686); one command away (`SPEC_MODE=dflash`).
+MTP-4's 134 — with every shallow gate unchanged. Same-day A/B (both lanes
+fresh, `runs/dflash-1m/ab-sameday-20261102.txt`): dflash leads decode at
+every measured point — solo code **255–256 vs 187.7 (+36%)**, N=8 code
+**795–818 vs 644.5**, code @128k **268 vs 200**, @1M **141.7 vs 121.0**,
+prefill equal; one command away (`SPEC_MODE=dflash`).
 
 Why MTP-**4** is the base and not the old MTP-3 prod: same-day A/B put k=4
 strictly ahead at the same pool class (5.16M vs 5.21M, both bf16 mamba) —

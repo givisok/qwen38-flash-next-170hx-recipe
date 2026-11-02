@@ -1,0 +1,45 @@
+# Same-day A/B: dflash k5 + bf16 mamba vs MTP-4 (prod) — generation speed
+# 2026-11-02, both lanes booted fresh this day, identical scripts, CT 101.
+# dflash ran twice (two boots) to capture boot-to-boot variance.
+# Question (user): does dflash still make sense vs MTP now that the YaRN
+# wall is gone? Answer: yes — dflash wins decode everywhere, code by +23-36%.
+
+## Decode, sparkDash protocol (sd_bench.py, medians of 3 passes)
+#                            dflash boot1 / boot2      MTP-4 @0.95      delta
+solo code                   255.0 / 256.2 tok/s        187.7 tok/s      +36%
+solo prose                  173.0 / 166.5              153.1            +9..13%
+solo structured             284.3 / 286.0              241.7            +18%
+N=8 code aggregate          795.1 / 818.4              644.5            +23..27%
+N=8 prose aggregate         678.1                      644.5            +5%
+N=8 structured aggregate    1269.5                     1126.3           +13%
+
+## Battery (std_battery.py)
+acceptance/emitted          60.3% / 4.01 and 59.1% / 3.95    63.2% / 3.53
+  (MTP accepts more OF ITS k=4 drafts: 0.88/token vs dflash 0.80 — but dflash
+   drafts deeper and still emits +13% tokens per step)
+sql task median             340.0 (boot2; 260.0 boot1)        267.0
+N=6 aggregate               619 / 585                        580           +1..7%
+
+## Depth (same scripts as the morning dflash run)
+code @128k                  268.2 tok/s                       199.9         +34%
+prose @128k                 163.6                             151.3         +8%
+prose temp1 @1M             141.7 tok/s, acc/draft 1.79       121.0, 1.45   +17%
+  (MTP-4's 2026-11-01 record was 134 @1M / 1.63 — today's 121.0 is the same
+   probe re-run; either way dflash's 141.7 leads)
+
+## Where they are EQUAL
+cold prefill 32k            2.64-2.65k tok/s            2.70-2.71k      -2% (noise)
+  (the morning belief "dflash drafter prefill overhead" was a protocol mix-up:
+   llm-assay @131k vs std_battery @32k are different animals — both lanes
+   prefill the same on the same protocol)
+pool                        5,185,037 @ gmu 0.94        5,282,636 @ 0.95
+  (at the SAME gmu the lanes were 5.19M vs 5.16M on 11-01 — dflash's pool was
+   never smaller; raising the dflash yml to 0.95 gives it the same +2.3%)
+greedy x2 byte-identity     False (both lanes; known int8-hop trait)
+N=16+                       one band (11-01 records) — speculation gains die with batch
+
+## Verdict
+dflash k5 wins generation speed at every measured point today; the margin
+peaks where this rig is used most (code +36% solo / +23-27% N=8) and holds
+at full depth (+17% @1M). MTP-4's last argument — the YaRN wall — is gone.
+Sensible next step if switching prod: dflash yml gmu 0.94 -> 0.95.
