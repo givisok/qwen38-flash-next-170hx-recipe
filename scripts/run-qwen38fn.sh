@@ -6,12 +6,12 @@
 # fs-tier LRU capacity cap). For a self-contained image: docker build -t
 # vllm-sm80:q38fn . ; then IMAGE=vllm-sm80:q38fn ./run-qwen38fn.sh
 #
-# All serve args live in configs/intel-1m-fp8-ssmbf16.yml; this script is
+# All serve args live in the CONFIG yml (default: MTP-4 prod lane); this script is
 # only container plumbing + the env knobs that aren't CLI args.
 set -euo pipefail
 NAME=${NAME:-qwen-intel}
 PORT=${PORT:-8080}
-CONFIG=${CONFIG:-$PWD/configs/awq-1m-fp8-ssmbf16.yml}
+CONFIG=${CONFIG:-$PWD/configs/awq-1m-fp8-ssmbf16-mtp4.yml}  # prod = MTP-4; rollback rung: CONFIG=$PWD/configs/awq-1m-fp8-ssmbf16.yml (MTP-3)
 
 # Base image and fork tree are a matched pair: the stack is a pure-Python
 # overlay on the pinned nightly's compiled objects, so the fork checkout must
