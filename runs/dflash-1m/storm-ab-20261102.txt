@@ -1,0 +1,44 @@
+# Multi-agent "prefill-storm neighbor" A/B — dflash k5 (with k schedule) vs MTP-4
+# 2026-11-02 night, same probe both lanes (scripts content: storm_probe.py on CT;
+# tasks from the real pi session — release-ticket analysis, read-only).
+# Probe: A = 2600-token RU analysis stream (thinking off, temp 0.6);
+# B = 5 back-to-back ~25k-token prompts, unique prefix per send (prefix-cache
+# MISS each time, ~4.3k tok/s prefill for ~29s) = the "merge agent re-reading
+# changed files" pattern; PAIR = two concurrent decoders, no prefill.
+
+## Results
+phase                     dflash k5 + sched    MTP-4 @0.95
+SOLO (RU analysis)             101.3 t/s          124.9 t/s
+STORM (neighbor prefills)       52.9 t/s           57.7 t/s   (both ~50% of own solo)
+  during-B in-window             ~3 t/s            ~3 t/s    (decode nearly stops in chunks)
+PAIR (2 decoders, no prefill)  102.9 / 99.1       107.9 / 105.3
+
+## Findings
+1. **The storm collapse is a STACK property, not the lane.** With a
+   cache-missing neighbor prefilling, BOTH lanes fall to ~50% of their solo
+   speed (dflash 52.9/101.3, MTP 57.7/124.9) and decode nearly stops during
+   each prefill chunk (~3 t/s in-window both). MTP is only +9% absolute in
+   the storm. The perceived "MTP didn't do this" likely reflects neighbors
+   whose context mostly prefix-cache HITS (same-session agents) — a hit
+   neighbor costs ~nothing (first broken probe: 1.0s sends, no load).
+2. **The k schedule [[1,2,5],[3,4,3],[5,16,3]] does not help the storm**
+   (as predicted: during a neighbor prefill the decode batch is 1 -> k stays
+   5). It only cheapens steps at 3+ CONCURRENT DECODING streams. Solo and
+   PAIR unchanged. Kept: harmless (pool 5,294,789, -4.4k tokens) and useful
+   for 3+ decoder contention.
+3. **On RU analysis content (thinking off) MTP-4 solo BEATS dflash**
+   (124.9 vs 101.3) — consistent with acceptance-by-content: dflash wins big
+   on code (93% accepted, +36%), but on RU prose/reasoning its acceptance
+   is 18-21% and MTP's head tracks the target better there. Lane choice is
+   workload-mix: code-heavy -> dflash; RU-analysis-heavy -> MTP-4.
+4. Two decoding agents without a prefill storm: near-perfect scaling on
+   BOTH lanes (~100-108 t/s per stream at N=2) — decode concurrency is not
+   the problem.
+
+## Levers if the storm case must improve (both lanes)
+- MIXED_PREFILL_CHUNK 864 -> 432: halves the prefill monopolization
+  quantum; decode gets ~2x more scheduling slots per neighbor token.
+  Cost: prefill throughput (slower cold agent starts). Not yet A/B'd.
+- Or accept: ~50% solo speed while a neighbor cold-reads big contexts.
+
+Boot args verified: num_speculative_tokens_per_batch_size=[[1,2,5],[3,4,3],[5,16,3]].

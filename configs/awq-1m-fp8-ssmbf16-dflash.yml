@@ -69,7 +69,10 @@ speculative-config:
   # 32k cap leaves 16x headroom) — if the draft KV group is charged by the
   # draft's model len instead of the target's 1M, the pool should recover.
   max_model_len: 32768
-  # flat k=5 + bf16 mamba state probe (slots 6 x 221KB = 1.33M fits the 1728 page)
+  # k schedule by concurrency (max k=5 keeps the 6 GDN slots in the 1728 page):
+  # 5 drafts for 1-2 decode reqs, 3 for 3-4, 3 beyond — cheaper decode steps
+  # under load (2026-11-02 multi-agent fix attempt).
+  num_speculative_tokens_per_batch_size: [[1, 2, 5], [3, 4, 3], [5, 16, 3]]
   num_speculative_tokens: 5
 
 # templates & parsers (model's own chat template mounted at /opt)
