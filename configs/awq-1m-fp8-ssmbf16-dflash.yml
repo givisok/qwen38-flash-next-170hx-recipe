@@ -22,13 +22,14 @@ disable-custom-all-reduce: true
 dtype: bfloat16
 max-model-len: 1048576
 # k=3 lane: GDN state slots (2+3) match the MTP-3 layout, so the MTP block fits.
-block-size: 3456
+block-size: 1728
 max-num-seqs: 16
 # aligned to the 1728 group block (4x); 8192 floors to 6912 and wastes 15.6%
-max-num-batched-tokens: 10368
+max-num-batched-tokens: 6912
 long-prefill-token-threshold: 2048
-gpu-memory-utilization: 0.94
+gpu-memory-utilization: 0.95
 kv-cache-dtype: fp8_e4m3
+mamba-ssm-cache-dtype: bfloat16
 enable-prefix-caching: true
 # g4bwy recipe: retention multiple of the 1728 block + fine-grained match unit
 # (default retention 0 keeps almost nothing; default match floor = block = 1728)
@@ -68,10 +69,8 @@ speculative-config:
   # 32k cap leaves 16x headroom) — if the draft KV group is charged by the
   # draft's model len instead of the target's 1M, the pool should recover.
   max_model_len: 32768
-  # k=7 lane: GDN slots (2+7) need block 3456 (2x1728; retention 17280=5x3456).
-  # k schedule by concurrency: 7 for 1-2 reqs, 5 for 3-4, 3 beyond.
-  num_speculative_tokens_per_batch_size: [[1, 2, 7], [3, 4, 5], [5, 16, 3]]
-  num_speculative_tokens: 7
+  # flat k=5 + bf16 mamba state probe (slots 6 x 221KB = 1.33M fits the 1728 page)
+  num_speculative_tokens: 5
 
 # templates & parsers (model's own chat template mounted at /opt)
 chat-template: /opt/chat_template.jinja
@@ -145,4 +144,3 @@ hf-overrides:
       partial_rotary_factor: 0.25
       mrope_interleaved: true
       mrope_section: [11, 11, 10]
-mamba-ssm-cache-dtype: bfloat16

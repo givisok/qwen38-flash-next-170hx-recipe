@@ -6,24 +6,23 @@ Home LLM rig: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** on vLLM with
 pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)**,
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
-Working point (2026-11-02): **production = MTP-4** (k=4 + bf16 mamba state,
-`gpu-memory-utilization: 0.95`, KV pool **5.28M tokens / 5.04×**; NOTES §19–21).
-The retained **DFlash k5 lane is now full-1M** — its YaRN-boundary wall
-(acc 0.01, ~47 tok/s past 262k) turned out to be the drafter's RoPE table
-running out of rows, fixed by one config line on 2026-11-02 (see the
-boundary note in §4): **1.79 acc/draft and 141.7 tok/s @1M** — above
-MTP-4's 134 — with every shallow gate unchanged. Same-day A/B (both lanes
-fresh, `runs/dflash-1m/ab-sameday-20261102.txt`): dflash leads decode at
-every measured point — solo code **255–256 vs 187.7 (+36%)**, N=8 code
-**795–818 vs 644.5**, code @128k **268 vs 200**, @1M **141.7 vs 121.0**,
-prefill equal; one command away (`SPEC_MODE=dflash`).
+Working point (2026-11-02 evening): **production = DFlash 2 k=5 + bf16
+mamba state @ `gpu-memory-utilization: 0.95`** — KV pool **5,299,239 tokens
+/ 5.05×**, the largest on this rig. The lane became full-1M earlier the same
+day: its YaRN-boundary wall (acc 0.01, ~47 tok/s past 262k) turned out to be
+the drafter's RoPE table running out of rows, fixed by one config line (see
+the boundary note in §4) — **1.79 acc/draft and 141.7 tok/s @1M**. Same-day
+A/B vs MTP-4 (`runs/dflash-1m/ab-sameday-20261102.txt`): dflash leads decode
+everywhere — solo code **255–256 vs 187.7 (+36%)**, N=8 code **795–818 vs
+644.5**, code @128k **268 vs 200**, @1M **141.7 vs 121.0**, prefill equal —
+so production switched back to dflash (the 11-01 campaign's intent, blocked
+then by the wall). MTP-4 @ 0.95 stays the rollback rung (`SPEC_MODE=mtp`).
 
-Why MTP-**4** is the base and not the old MTP-3 prod: same-day A/B put k=4
-strictly ahead at the same pool class (5.16M vs 5.21M, both bf16 mamba) —
-sparkDash solo code **195 vs 169**, structured **241 vs 206**, prose parity
-149 vs 150 — and the extra draft token costs nothing at depth (1.63
-acc/draft @1M, no cliff). MTP-3 (base yml `awq-1m-fp8-ssmbf16.yml`) is
-kept as a deeper rollback rung only; nothing runs it today.
+MTP-4 is the rollback rung, not the prod: it held production from
+2026-11-01 night (chosen when the dflash YaRN wall looked unfixable) to
+2026-11-02 evening. The lane ladder: dflash k5 (prod, `awq-1m-fp8-ssmbf16-dflash.yml`)
+→ MTP-4 (`awq-1m-fp8-ssmbf16-mtp4.yml`, `SPEC_MODE=mtp`) → MTP-3 (base
+yml `awq-1m-fp8-ssmbf16.yml`); nothing below the prod runs today.
 
 ---
 
@@ -55,24 +54,27 @@ only proven in someone else's SGLang fork.
 
 ## 3. Key configuration decisions
 
-Final serve config: [`configs/awq-1m-fp8-ssmbf16-mtp4.yml`](configs/awq-1m-fp8-ssmbf16-mtp4.yml)
-(MTP-4 production lane; the launcher's plain `./run-qwen38fn.sh` defaults to it since
-2026-11-02). [`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf16.yml) (MTP-3)
-is the deeper rollback rung. The endpoint requires an API key (`api-key:` in the yml,
+Final serve config: [`configs/awq-1m-fp8-ssmbf16-dflash.yml`](configs/awq-1m-fp8-ssmbf16-dflash.yml)
+(DFlash 2 k=5 + bf16 mamba @ 0.95 production lane; the launcher's plain
+`./run-qwen38fn.sh` defaults to it since 2026-11-02 evening).
+[`configs/awq-1m-fp8-ssmbf16-mtp4.yml`](configs/awq-1m-fp8-ssmbf16-mtp4.yml) (MTP-4,
+`SPEC_MODE=mtp`) is the rollback rung, and
+[`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf16.yml) (MTP-3) the deeper
+one. The endpoint requires an API key (`api-key:` in the yml,
 set on the server).
 
 | Parameter | Value | Why |
 |---|---|---|
 | `pipeline-parallel-size` | 3 | P2P between the cards is broken (DMA glitches on this hardware) → TP is impossible, PP only |
 | `VLLM_PP_LAYER_PARTITION` | **17,17,14** | 48 layers. The last rank carries the target `lm_head` + MTP draft + the W4A16 draft head, and the KV planner takes the **min raw bytes across ranks** — PP2 binds the pool. 2026-10-30: one layer off PP2 → pool 4.69×→4.97×, decode neutral (max layers/rank still 17), N=6 aggregate record 402 tok/s. Earlier: 17,16,15 (utilization sweep, +7.5% single-stream vs 16/16/16); 17,18,13 NOT recommended — hits PP0's byte ceiling and unbalances decode |
-| `speculative-config` | `method: mtp, model: …/mtp-fp8, num_speculative_tokens: 4` | +75% single-stream (120 vs 66–70 without MTP); ngram_gpu tried — worse. 2026-10-28: switched to the author's FP8 draft (`mtp-fp8/` in the checkpoint dir) — one config line, +8% single-stream, KV pool 4.29×→4.69×. Depth 4 was rejected on 2026-10-28 (−8% on MTP-3-era stack), then re-won on 2026-11-01 at the bf16-mamba state (solo code 195 vs 169, structured 241 vs 206, no depth cost to 1M) → production |
+| `speculative-config` | `method: mtp, model: …/mtp-fp8, num_speculative_tokens: 4` | +75% single-stream (120 vs 66–70 without MTP); ngram_gpu tried — worse. 2026-10-28: switched to the author's FP8 draft (`mtp-fp8/` in the checkpoint dir) — one config line, +8% single-stream, KV pool 4.29×→4.69×. Depth 4 was rejected on 2026-10-28 (−8% on MTP-3-era stack), then re-won on 2026-11-01 at the bf16-mamba state (solo code 195 vs 169, structured 241 vs 206, no depth cost to 1M) → production. Superseded as prod by DFlash k5 on 2026-11-02 evening (same-day A/B: dflash +36% solo code); MTP-4 stays the rollback lane |
 | `max-num-seqs` | 16 | 8→16 raised aggregate from 360 to ~500–600 tok/s; cards sit at 84–100% utilization |
 | `cudagraph_capture_sizes` | `[1,2,4,...,64]` step 4 | from the mannydelrio repo: the MTP batch rounds up to 4 |
 | `kv-cache-dtype` | fp8_e4m3 | software emulation on sm80; KV pool of 5.28M tokens (current) |
 | `max-model-len` | 1,048,576 | YaRN ×4 over 262144 (in `hf-overrides`, plus `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`), `block-size: 1728`, `rope_theta 1e7` |
 | `layer_types` override | 3× linear_attention + 1× qwen_sparse_attention ×12 | bridges the transformers rename (full_attention → indexed_attention) |
 | `NCCL_P2P_DISABLE=1` + `disable-custom-all-reduce` | | P2P hangs on these cards |
-| `gpu-memory-utilization` | **0.95** | 0.94 held from bring-up to 2026-11-01 (pool 5.16M/4.92× on MTP-4). 2026-11-02: 0.94→0.95, A/B'd with llm-assay `ab-deploy` (paired seed, no regressions; `runs/gmu095/`) → pool 5,163,367→**5,282,636 tokens, 5.04×** — first time past 5×. 131k battery: cold prefill 4179 tok/s, follow-up turn TTFT 2.10 s; needle 120k PASS |
+| `gpu-memory-utilization` | **0.95** | 0.94 held from bring-up to 2026-11-01 (pool 5.16M/4.92× on MTP-4). 2026-11-02: 0.94→0.95, A/B'd with llm-assay `ab-deploy` (paired seed, no regressions; `runs/gmu095/`) → pool 5,163,367→**5,282,636 tokens, 5.04×** — first time past 5×. 131k battery: cold prefill 4179 tok/s, follow-up turn TTFT 2.10 s; needle 120k PASS. 2026-11-02 evening: dflash k5 raised to 0.95 too → pool **5,299,239 / 5.05×** (new rig record), N=8 code agg 870.5 (lane record), acceptance 62.3% / 4.11 |
 | **kv-transfer-config (tiering)** | **ABSENT (removed)** | see §6 — the source of KV corruption |
 
 ## 4. Fork patches for this checkpoint (required)
@@ -141,7 +143,7 @@ tree (the launcher bind-mounts the fork files over the image):
    was wrong — see TUNING); the pool gain came from the §3 repartition instead.
 10. **`qwen4exp-dflash2-target.diff` +
     `configs/awq-1m-fp8-ssmbf16-dflash.yml`** (2026-10-31 port → 2026-11-01
-    two fixes → **current production lane: DFlash 2 k=7**) — port of the
+    two fixes → k=7, then k=5+bf16 became **the production lane on 2026-11-02 evening**) — port of the
     inco.ai DFlash 2 drafter target-side via ElectroHobo's recipe.
     `Qwen4ExpModel` gains `EagleModelMixin` + aux-state capture (completed HC
     state entering layers 6/16/26/36/46, hc-mean — exactly what inco.ai
@@ -251,9 +253,10 @@ tree (the launcher bind-mounts the fork files over the image):
     branch `dflash2-pool` @ `9eadcf0a8f`; increment diff in
     `patches/dflash2-pool-increment.diff`), kit `main` @ `f248264`. Both
     lanes boot-tested from this tree. Diagnostics behind `VLLM_CACHE_DIAG=1`.
-    Rollback ladder: k3 = block 1728/chunk 6912/k3 (kit history 0a95834);
-    MTP-4 = the plain default since 2026-11-02 (`./run-qwen38fn.sh`,
-    `SPEC_MODE=mtp` explicitly works too; earlier state `prod-mtp4-20261101`).
+    Rollback ladder: dflash k5 = the plain default since 2026-11-02 evening
+    (`./run-qwen38fn.sh`; earlier state `prod-mtp4-20261102`);
+    MTP-4 = `SPEC_MODE=mtp` (tag `prod-mtp4-20261102`); k3 = block 1728/chunk 6912/k3
+    (kit history 0a95834).
     Drafter: `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
     `/home/models/qwen38-dflash2-drafter`. Tag: `prod-dflash-k7-20261101`.
 
@@ -344,9 +347,15 @@ DecodeBench protocol, `scripts/sd_bench.py`; cache from `scripts/cache_probe.py`
 | Decode at 32k / 128k depth, code | — | 294 / 288 (flat) | — / 269 (flat) |
 | Needle | 64k PASS | 64k PASS | **64k + 120k PASS** |
 | Cold prefill (exact, prompt_tokens) | — | 3.66k @13k, 4.35–4.41k @54–110k | same class |
-| GPU KV pool | **5.28M / 5.04×** (0.95, 11-02) | 4.01M / 3.83× | 5.19M / 4.94× |
+| GPU KV pool | 5.28M / 5.04× (0.95) | 4.01M / 3.83× | **5.30M / 5.05×** (0.95, 11-02 evening) |
 
 (*MTP-4 battery single-run, others 2-round medians.)
+
+2026-11-02 evening, prod switch back to dflash k5 @ 0.95 (pool 5,299,239 /
+5.05×): gates on the booted prod — solo 255.5 / 171.2 / 285.6 (band),
+**N=8 code agg 870.5 (lane record**, 0.94 gave 795–832), battery acceptance
+**62.3% / 4.11** (best on the lane), needle 120k PASS 31.5 s, cold prefill
+32k unchanged 2.6k. Full-day evidence: `runs/dflash-1m/`.
 
 Live pi-agent session same-day A/B (pi counts output tokens over full turn
 time, prefill included): MTP stretch median ~88 out tok/s (~130 with

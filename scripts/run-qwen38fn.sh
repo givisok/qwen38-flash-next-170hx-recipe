@@ -11,7 +11,7 @@
 set -euo pipefail
 NAME=${NAME:-qwen-intel}
 PORT=${PORT:-8080}
-CONFIG=${CONFIG:-$PWD/configs/awq-1m-fp8-ssmbf16-mtp4.yml}  # prod = MTP-4; rollback rung: CONFIG=$PWD/configs/awq-1m-fp8-ssmbf16.yml (MTP-3)
+CONFIG=${CONFIG:-$PWD/configs/awq-1m-fp8-ssmbf16-mtp4.yml}  # overridden by SPEC_MODE below; prod = dflash k5; rollback rung: SPEC_MODE=mtp (MTP-4)
 
 # Base image and fork tree are a matched pair: the stack is a pure-Python
 # overlay on the pinned nightly's compiled objects, so the fork checkout must
@@ -48,7 +48,7 @@ QSA_CANONICAL=${QSA_CANONICAL:-1}  # 1 = QSA top-k tie fix (canonical set)
 QSA_SORTED=${QSA_SORTED:-1}    # 1 = also sort selected blocks ascending
 ROUTER_FP32=${ROUTER_FP32:-1}      # 1 = fp32 MoE router logits (Morrowmake port)
 MTP_PER_STREAM=${MTP_PER_STREAM:-0}  # 1 = per-stream MTP hidden norm (Morrowmake port)
-SPEC_MODE=${SPEC_MODE:-mtp}  # prod = MTP-4 lane; dflash k5 lane: SPEC_MODE=dflash
+SPEC_MODE=${SPEC_MODE:-dflash}  # prod = dflash k5 + bf16 mamba @ 0.95 (since 2026-11-02); rollback rung: SPEC_MODE=mtp (MTP-4 @ 0.95)
 SWA_BLOCK_CAP=${SWA_BLOCK_CAP:-432}
 SWA_NO_PREFIX_CACHE=${SWA_NO_PREFIX_CACHE:-1}  # 1 = draft SWA group opts out of prefix caching (keeps fine-grained hits for the target); 0 = stock   # dflash draft SWA block tokens: 5 layers x 432 x 4096B == GDN group page (8.85MB) so the pool bytes-per-block stays at the GDN level; 0 = off         # dflash = inco.ai DFlash2 (default; A/B won) | mtp = checkpoint MTP-3
 PP_INT8_HOP=${PP_INT8_HOP:-1}        # 1 = int8 PP handoff (g4bwy patch 0006 port); A/B: PP_INT8_HOP=0 ./run-qwen38fn.sh
