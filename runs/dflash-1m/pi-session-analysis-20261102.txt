@@ -1,0 +1,44 @@
+# pi-agent real-traffic analysis: "dflash feels slower on reasoning?" — 2026-11-02
+# Source: ~/.pi/agent/sessions/*/2026-11-02T*.jsonl (vllm-fn/qwen3.8, xhigh, RU work)
+# Method: every assistant turn bucketed by its timestamp into the day's lane
+# windows; speed = usage.output / message durationMs (client-side timing —
+# immune to streaming-buffer artifacts).
+
+## Windows (local time)
+MTP-4@0.95      12:39-13:47  273 turns  (clean: morning benches ended ~10:00)
+dflash@0.94     13:47-15:04  131 turns  (CONTENDED: the rig's own battery ran
+                                          concurrently — 512k/1M probes, sd_bench
+                                          waves 8/16/32, needle_1m cold 1M prefill)
+dflash@0.95prod 18:45-...     45+ turns (clean)
+
+## Wall tok/s (aggregate out-tokens / sum durations)
+window                  all    reasoning>=50%  content<50%  matched out 300-900
+MTP-4   clean           97.1       94.3           101.5          93.9
+dflash  CONTENDED       92.3       87.3            96.0          88.1
+dflash  clean (prod)   112.7      108.6           120.8         103.0
+
+Reasoning per-turn tps: MTP med 88 (p25 74) | dflash contended med 84 (p25 73)
+                        | dflash clean med 108 (p25 98).
+
+The "slower on reasoning" feeling is real but dates from the contended window
+(-10% vs MTP): the rig's own test battery was hammering the same server. In
+clean windows dflash@0.95 leads MTP-4 by +15% on reasoning turns, +16% overall,
+with LARGER inputs (in-med ~3.9k vs ~0.9k tokens — more prefill inside the
+same durationMs, so the decode margin is understated if anything).
+
+## Live acceptance by content type (fresh probes, /metrics deltas, temp 0.6)
+content                 accepted-of-drafted   tokens/step   (k=5)
+CODE (EN, raw)               93%                4.66
+RU reasoning (xhigh)         21%                1.07
+EN reasoning (high)          20%                1.02
+RU prose                     18%                0.90
+
+Mechanism: the dflash drafter is near-perfect on code (hence +36% solo code)
+and drops to ~1 token/step on reasoning/prose — yet still beats MTP-4 there,
+because the MTP head's acceptance collapses on the same text too and dflash's
+deeper draft keeps a small edge end-to-end (108.6 vs 94.3 in clean windows).
+
+## Verdict
+Prod stays dflash k5 @ 0.95. RU reasoning is NOT slower — it is +15% in clean
+conditions. Operational lesson: heavy bench batteries must not overlap live
+pi sessions; schedule or warn.
