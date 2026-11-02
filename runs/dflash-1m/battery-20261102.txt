@@ -1,0 +1,58 @@
+# dflash k5 + bf16 mamba — full battery after the drafter rope-table fix
+# 2026-11-02, CT 101, 3x CMP 170HX, gpu-memory-utilization 0.94 (lane as tagged)
+# Fix under test: /home/models/qwen38-dflash2-drafter/config.json
+#   max_position_embeddings: 262144 -> 1048576  (rope_parameters untouched:
+#   rope_type default, theta 1e4). Backup: config.json.bak-262k
+# Baselines: 2026-11-01 lane record (README lane table + gates) and the
+# YaRN-boundary collapse (acc 0.01, ~47 tok/s at 512k-1M).
+
+## Boot
+GPU KV cache size: 5,185,037 tokens, Maximum concurrency 4.94x   # vs 5,182,071 on 11-02 morning boot: +2,966, no pool cost
+Capturing model for DFlash2 speculator...                          # k5 lane booted
+(known warning, unchanged): "no KV cache group could be identified as the draft model's"
+
+## Sanity: sparkDash solo decode (sd_bench.py 1) — gate 253-257 / 173 / 285
+code:       N=1: per-req median 255.0 tok/s | TTFT 124 ms   # in band
+prose:      N=1: per-req median 173.0 tok/s | TTFT 122 ms   # exact
+structured: N=1: per-req median 284.3 tok/s | TTFT 120 ms   # in band
+
+## Decisive: spec acceptance vs depth (spec_gate_depth.py, prose temp 1)
+# was: 250k healthy; 512k & 1M -> acc/draft 0.01, decode ~47 tok/s
+@250,080 tok: TTFT 56.6s  | decode 121.1 tok/s | acc/draft 1.62   # control, below old boundary
+@512,188 tok: TTFT 116.3s | decode 131.8 tok/s | acc/draft 1.79   # RECOVERED
+@1,000,545 tok: TTFT 230.9s | decode 141.7 tok/s | acc/draft 1.79 # RECOVERED (MTP-4 prod: 134 @1M)
+
+## Depth decode (depth_probe_code.py 128000 512000, usage-token based)
+code @128k: median 268.2 tok/s    # gate: 269 (11-01 record) — unchanged
+code @512k: 300.1 tok/s (full 400-tok pass; sibling pass printed 496 on a 93-token completion = timing artifact)
+prose @128k: 163.6 tok/s
+prose @512k: 157.1 tok/s          # -4% over 4x depth — flat
+
+## Quality gates
+needle_deep.py (120k): found=True, 31.3s                         # PASS
+needle_1m.py: needle queries passed: 18/18 (stations 5/20/40/60/80/95%, 3 rounds each,
+  1,007,424 / ~1,010,360 tokens prefix-cached, TTFT 4.3-4.5s; ctrl-ZULU negative clean)
+std_battery.py:
+  solo TG code battery 155.7 / 187.0 / 207.5 / 260.0 medians
+  battery acceptance 60.3% | emitted/step 4.01                  # gate: 60.6% / 4.03
+  N=6 aggregate 619 tok/s | acceptance 59.4% | 3.97
+  cold prefill 32k: TTFT 12.1s (~2.64k tok/s)                   # lane prefill unchanged (drafter overhead)
+  greedy x2 byte-identity: False                                # known stack trait (int8 hop: 2/3 identical historically)
+
+## Load waves (sd_bench.py 8 16 32)
+code:       N=8 agg 795.1 | N=16 agg 523.3 | N=32 agg 461.3     # N=8 record was 832: -4.4%, run-to-run band
+prose:      N=8 agg 672.4 | N=16 agg 311.6 | N=32 agg 302.0
+structured: N=8 agg 1265.5 | N=16 agg 495.5 | N=32 agg 498.7
+
+## Verdict
+The YaRN-boundary wall was the drafter's cos/sin table running out at row
+262,144 (rope_type default -> table sized by max_position_embeddings; the
+speculator feeds real target positions to 1M; Triton reads past the end
+silently). Extending the table to 1,048,576 rows with UNCHANGED frequencies
+restores acceptance to baseline at every depth (1.79 acc/draft @512k/1M,
+vs 1.62 @250k control) — rope angles below 262,144 are bit-identical, so
+nothing in the working range changed (solo/battery/acceptance gates all
+match). Residual yarn-space distribution shift on captured target states:
+not measurable. dflash k5 is now a full-1M lane and out-decodes MTP-4 prod
+at depth (141.7 vs 134 tok/s @1M probe protocol). Production kept on MTP-4
+this run; switching is a separate decision.

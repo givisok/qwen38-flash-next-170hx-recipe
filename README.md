@@ -7,13 +7,14 @@ pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
 Working point (2026-11-02): **production = MTP-4** (k=4 + bf16 mamba state,
-`gpu-memory-utilization: 0.95`, KV pool **5.28M tokens / 5.04×**) — chosen after the depth sweep
-showed DFlash speculation dies at the 262,144 YaRN boundary (acc 0.01,
-47 tok/s at 512k–1M) while the MTP head shares the target's rope and stays
-flat to 1M (**1.63 acc/draft, 134 tok/s @1M**; NOTES §19–21). Below ~250k
-the retained DFlash k5 lane is faster on code (sparkDash code 253–257 vs
-195 tok/s solo, N=8 code 832 vs 686); it remains one command away
-(`SPEC_MODE=dflash`).
+`gpu-memory-utilization: 0.95`, KV pool **5.28M tokens / 5.04×**; NOTES §19–21).
+The retained **DFlash k5 lane is now full-1M** — its YaRN-boundary wall
+(acc 0.01, ~47 tok/s past 262k) turned out to be the drafter's RoPE table
+running out of rows, fixed by one config line on 2026-11-02 (see the
+boundary note in §4): **1.79 acc/draft and 141.7 tok/s @1M** — above
+MTP-4's 134 — with every shallow gate unchanged. Below ~250k it is still
+faster on code than MTP-4 (sparkDash code 253–257 vs 195 tok/s solo,
+N=8 code 832 vs 686); one command away (`SPEC_MODE=dflash`).
 
 Why MTP-**4** is the base and not the old MTP-3 prod: same-day A/B put k=4
 strictly ahead at the same pool class (5.16M vs 5.21M, both bf16 mamba) —
@@ -187,10 +188,13 @@ tree (the launcher bind-mounts the fork files over the image):
     | dflash k=7 † | 292–299 / 152–181 / 355–360 | 707–741 | 4.01M |
     | **dflash k=5 + bf16 mamba** † | **253–257 / 173 / 285** | **832** | **5.19M** |
 
-    † dflash numbers are for depths **≤ 262,144 only**: past the YaRN boundary
-    the drafter stops speculating usefully (no `rope_scaling` — acceptance
-    0.01, decode pinned at ~47 tok/s at 512k–1M; see the boundary caveat
-    below). The MTP lanes share the target's rope and stay flat to 1M.
+    † dflash depth limit **removed 2026-11-02**: the drafter's RoPE table had
+    only 262,144 rows while the speculator feeds real target positions to 1M —
+    past the boundary the reads ran off the table (silent garbage angles,
+    acceptance 0.01). One config line (drafter `max_position_embeddings`
+    262144→1048576, rope untouched) restores **1.79 acc/draft at 512k and 1M**
+    with every shallow number unchanged (see the boundary note below and
+    `runs/dflash-1m/`).
 
     2026-11-02: production MTP-4 raised to `gpu-memory-utilization: 0.95`
     → pool **5.28M / 5.04×** (llm-assay A/B, no regressions; `runs/gmu095/`).
@@ -198,6 +202,10 @@ tree (the launcher bind-mounts the fork files over the image):
     k5+bf16 quality gates: needle 64k and 120k PASS (`scripts/needle_deep.py`),
     prefix cache at 95k = 0.41 s resend (95,584 / 95,600 tokens cached),
     decode flat at 128k depth (code 269 tok/s), acceptance 60.6% / 4.03 tok/step.
+    2026-11-02 re-run after the rope-table fix: every gate reproduced
+    (solo 255/173/284, acceptance 60.3/4.01, code @128k 268) and depth now
+    flat through 1M — code 300 @512k, prose 163.6 @128k → 157.1 @512k,
+    needle 1M again 18/18.
 
     Full-depth gate (`scripts/needle_1m.py`, 2026-11-01): one 1,010,326-token
     record wall, six needles at 5/20/40/60/80/95 % depth, each asked 3× with
@@ -207,17 +215,29 @@ tree (the launcher bind-mounts the fork files over the image):
     cache at 1M scale — 1,007,424 / 1,010,360 tokens cached, TTFT 4.3–4.5 s
     (~52× vs cold). This is also the SWA cache fix proven at full depth.
 
-    **Boundary caveat (NOTES §19–20)**: target retrieval is fine to 1M, but
-    DFlash *speculation* only works ≤ 262,144 tokens — the drafter ships
-    `max_position_embeddings: 262144, rope_scaling: None` (no YaRN) while the
-    target yarns ×4. Depth sweep (prose, temp 1): prefill flat 4.24–4.41k
-    tok/s 32k→1M; decode ~110–133 tok/s with 1.4–1.9 acc/draft up to 256k;
-    past the boundary acc 0.01 and decode pinned at **~47 tok/s** (constant
-    k=5 verify penalty, identical at 512k and 1M). Agent sessions should
-    compact below ~250k; a fork gate that skips drafting past the boundary is
-    the proper fix. The MTP head shares the target's rope — sweep §21
-    confirmed it stays flat to 1M (1.63 acc/draft, 134 tok/s), and
-    production switched to MTP-4 on 2026-11-01 night for this reason.
+    **Boundary caveat (NOTES §19–20) — RESOLVED 2026-11-02**: the drafter
+    shipped `max_position_embeddings: 262144, rope_type: default`, so its
+    cos/sin table had exactly 262,144 rows while the speculator feeds real
+    target positions up to 1M — past the boundary both draft queries and the
+    injected target-state keys read **past the end of the table** (Triton
+    garbage angles, silently: acc 0.01, decode pinned at ~47 tok/s,
+    identical at 512k and 1M). The first diagnosis ("no rope_scaling /
+    yarn mismatch") was wrong in the mechanism but right in the location.
+    Fix: drafter config.json `max_position_embeddings: 262144 → 1048576`
+    with `rope_parameters` **untouched** — RoPE attention depends only on
+    relative position, so angles below 262,144 are bit-identical (all
+    shallow gates unchanged) and the ×4 table costs no pool (5,185,037 vs
+    5,182,071). Do **not** copy the target's yarn block into the drafter:
+    yarn blends frequencies at all positions and would break the working
+    ≤256k range too (the drafter was trained on plain theta-1e4 rope).
+    Post-fix battery (`runs/dflash-1m/battery-20261102.txt`): acc/draft
+    1.62 @250k control / **1.79 @512k / 1.79 @1M**, decode 121 / 131.8 /
+    **141.7 tok/s** (MTP-4 prod: 134 @1M); code @128k 268 / @512k 300;
+    needle 120k PASS; needle 1M 18/18 PASS; battery acceptance 60.3% /
+    4.01 (gate 60.6 / 4.03); sparkDash solo 255 / 173 / 284. Production
+    stayed on MTP-4 through this fix — switching lanes is a separate
+    decision. The MTP head needs none of this: it shares the target's rope
+    and was always flat to 1M (1.63 acc/draft, 134 tok/s).
 
     Under load (N=16/32) all lanes sit in one ~2.8–3.4k chars/s band —
     speculation gains die with batch; the lanes differ at light load, where
