@@ -8,7 +8,7 @@
 # cover 16 seqs x 4 = 64 tokens or the tail runs graphless.
 model: /models/qwen38fn-awq-g32
 served-model-name: qwen3.8
-api-key: ***REDACTED-API-KEY***
+api-key: <set-on-server>
 host: 0.0.0.0
 port: 8000
 

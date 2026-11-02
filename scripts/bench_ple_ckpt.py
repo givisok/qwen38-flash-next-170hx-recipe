@@ -10,7 +10,8 @@ prefill-dominated. Solo requests only (no FN12 interference).
 """
 import json, random, sys, time, urllib.request
 
-BASE = "http://<model-server-ip>:8080"
+import os
+BASE = os.environ.get("QWEN38FN_BASE", "http://localhost:8080")
 TAG = sys.argv[1] if len(sys.argv) > 1 else "run"
 
 FILLER = ("The quick brown fox jumps over the lazy dog near the river bank. "

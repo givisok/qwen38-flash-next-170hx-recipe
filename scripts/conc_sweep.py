@@ -1,7 +1,8 @@
 import json, time, threading, urllib.request, sys
 
 BASE = "http://localhost:8080"
-KEY = "***REDACTED-API-KEY***"
+import os
+KEY = os.environ["QWEN38FN_API_KEY"]  # export QWEN38FN_API_KEY first
 H = {"Content-Type": "application/json", "Authorization": "Bearer " + KEY}
 
 PROMPTS = [
