@@ -6,22 +6,21 @@ Home LLM rig: **Qwen3.8-Flash-Next 180B-A6B (Uncensored, AWQ-g32)** on vLLM with
 pipeline parallelism across 3 **CMP 170HX cards (unlocked to 64 GB, sm80/Ampere)**,
 1M-token context, MTP speculative decoding, fp8 KV cache.
 
-Working point (2026-11-02 evening): **production = DFlash 2 k=5 + bf16
-mamba state @ `gpu-memory-utilization: 0.95`** — KV pool **5,299,239 tokens
-/ 5.05×**, the largest on this rig. The lane became full-1M earlier the same
-day: its YaRN-boundary wall (acc 0.01, ~47 tok/s past 262k) turned out to be
-the drafter's RoPE table running out of rows, fixed by one config line (see
-the boundary note in §4) — **1.79 acc/draft and 141.7 tok/s @1M**. Same-day
-A/B vs MTP-4 (`runs/dflash-1m/ab-sameday-20261102.txt`): dflash leads decode
-everywhere — solo code **255–256 vs 187.7 (+36%)**, N=8 code **795–818 vs
-644.5**, code @128k **268 vs 200**, @1M **141.7 vs 121.0**, prefill equal —
-so production switched back to dflash (the 11-01 campaign's intent, blocked
-then by the wall). MTP-4 @ 0.95 stays the rollback rung (`SPEC_MODE=mtp`).
+Working point (2026-11-02 night): **production = MTP-4** (k=4 + bf16
+mamba state @ `gpu-memory-utilization: 0.95`, KV pool **5,282,636 / 5.04×**).
+DFlash k5 held prod for one evening, then the storm A/B settled the split:
+dflash wins CODE hard (solo 255–256 vs 187.7, +36%; N=8 870 vs 645) and the
+1M tail (141.7 vs 121.0 tok/s) — but MTP-4 wins RU analysis content
+(**124.9 vs 101.3** solo) and multi-agent storms are near-parity
+(52.9 vs 57.7, both ~50% of own solo — a stack property, see
+`runs/dflash-1m/storm-ab-20261102.txt`). This rig's agent traffic is
+RU-analysis-heavy, so MTP-4 came back. The DFlash k5 lane is now full-1M
+(rope-table fix, §4) with a k-schedule — one command away
+(`SPEC_MODE=dflash`) for code-heavy sessions.
 
-MTP-4 is the rollback rung, not the prod: it held production from
-2026-11-01 night (chosen when the dflash YaRN wall looked unfixable) to
-2026-11-02 evening. The lane ladder: dflash k5 (prod, `awq-1m-fp8-ssmbf16-dflash.yml`)
-→ MTP-4 (`awq-1m-fp8-ssmbf16-mtp4.yml`, `SPEC_MODE=mtp`) → MTP-3 (base
+The lane ladder: MTP-4 (prod, `awq-1m-fp8-ssmbf16-mtp4.yml`) →
+dflash k5 full-1M (`awq-1m-fp8-ssmbf16-dflash.yml`, `SPEC_MODE=dflash`;
+the better lane for code-heavy work) → MTP-3 (base
 yml `awq-1m-fp8-ssmbf16.yml`); nothing below the prod runs today.
 
 ---
@@ -54,13 +53,14 @@ only proven in someone else's SGLang fork.
 
 ## 3. Key configuration decisions
 
-Final serve config: [`configs/awq-1m-fp8-ssmbf16-dflash.yml`](configs/awq-1m-fp8-ssmbf16-dflash.yml)
-(DFlash 2 k=5 + bf16 mamba @ 0.95 production lane; the launcher's plain
-`./run-qwen38fn.sh` defaults to it since 2026-11-02 evening).
-[`configs/awq-1m-fp8-ssmbf16-mtp4.yml`](configs/awq-1m-fp8-ssmbf16-mtp4.yml) (MTP-4,
-`SPEC_MODE=mtp`) is the rollback rung, and
+Final serve config: [`configs/awq-1m-fp8-ssmbf16-mtp4.yml`](configs/awq-1m-fp8-ssmbf16-mtp4.yml)
+(MTP-4 production lane; the launcher's plain `./run-qwen38fn.sh` defaults
+to it, again, since 2026-11-02 night).
+[`configs/awq-1m-fp8-ssmbf16-dflash.yml`](configs/awq-1m-fp8-ssmbf16-dflash.yml)
+(DFlash 2 k=5 + bf16 mamba @ 0.95, full-1M, k-schedule — the code lane,
+`SPEC_MODE=dflash`) is one command away, and
 [`configs/awq-1m-fp8-ssmbf16.yml`](configs/awq-1m-fp8-ssmbf16.yml) (MTP-3) the deeper
-one. The endpoint requires an API key (`api-key:` in the yml,
+rung. The endpoint requires an API key (`api-key:` in the yml,
 set on the server).
 
 | Parameter | Value | Why |
@@ -253,10 +253,10 @@ tree (the launcher bind-mounts the fork files over the image):
     branch `dflash2-pool` @ `9eadcf0a8f`; increment diff in
     `patches/dflash2-pool-increment.diff`), kit `main` @ `f248264`. Both
     lanes boot-tested from this tree. Diagnostics behind `VLLM_CACHE_DIAG=1`.
-    Rollback ladder: dflash k5 = the plain default since 2026-11-02 evening
-    (`./run-qwen38fn.sh`; earlier state `prod-mtp4-20261102`);
-    MTP-4 = `SPEC_MODE=mtp` (tag `prod-mtp4-20261102`); k3 = block 1728/chunk 6912/k3
-    (kit history 0a95834).
+    Rollback ladder: MTP-4 = the plain default since 2026-11-02 night
+    (`./run-qwen38fn.sh`; dflash held prod for one evening, tag
+    `prod-dflash-k5-20261102`); dflash k5 = `SPEC_MODE=dflash` (full-1M +
+    k-schedule); k3 = block 1728/chunk 6912/k3 (kit history 0a95834).
     Drafter: `incoai/Qwen3.8-Flash-Next-DFlash2` (Apache-2.0, 1.1 GB) at
     `/home/models/qwen38-dflash2-drafter`. Tag: `prod-dflash-k7-20261101`.
 
