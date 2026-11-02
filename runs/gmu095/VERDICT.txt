@@ -1,0 +1,47 @@
+llm-assay scenario ab-deploy: WARN
+
+[PASS] detect (before): /models/qwen38fn-awq-g32, served as qwen3.8, max ctx 1048576, 0.31.1rc1.dev253+g7d0b4e57a
+[WARN] benchmark (before): /models/qwen38fn-awq-g32 did not load, so shapes were counted with gpt2 and their labels are approximate: pass --tokenizer <base model repo>
+[PASS] endpoint: changed: gpu_memory_utilization: 0.94 -> 0.95; kv_cache_size_tokens: 5163367 -> 5282636
+[WARN] benchmark (after): /models/qwen38fn-awq-g32 did not load, so shapes were counted with gpt2 and their labels are approximate: pass --tokenizer <base model repo>
+[PASS] compare-prefill: 2 statistically significant difference(s) at alpha=0.05.
+[PASS] compare-decode: 1 statistically significant difference(s) at alpha=0.05.
+
+before: gpu-memory-utilization 0.94, MTP-4   after: gpu-memory-utilization 0.95, MTP-4
+--- compare-prefill ---
+metric: pp_throughput   test: paired   alpha=0.05
+
+test                                baseline           after     delta        p  verdict
+------------------------------------------------------------------------------------------------
+d0 pp512 tg64 inf                    1824.49         1952.96     +7.0%   0.0462  BETTER
+d0 pp2048 tg64 inf                   3056.40         2945.76     -3.6%   0.0617  no difference
+d0 pp8192 tg64 inf                   3468.26         3426.54     -1.2%   0.1045  no difference
+d4096 pp512 tg64 inf                 2524.13         3176.29    +25.8%   0.2566  no difference
+d4096 pp2048 tg64 inf                3364.77         3415.36     +1.5%   0.0197  BETTER
+d4096 pp8192 tg64 inf                3542.68         3611.52     +1.9%   0.1094  no difference
+
+2 statistically significant difference(s) at alpha=0.05.
+Rows marked 'no difference' are not evidence of equivalence -- they may just be underpowered; raise --runs or use --target-ci, or pass --equivalence-margin
+to test for equivalence directly.
+--- compare-decode ---
+metric: tg_throughput   test: paired   alpha=0.05
+
+test                                baseline           after     delta        p  verdict
+------------------------------------------------------------------------------------------------
+d0 pp512 tg64 inf                     100.74          117.04    +16.2%   0.0200  BETTER
+d0 pp2048 tg64 inf                    111.97          107.50     -4.0%   0.6137  no difference
+d0 pp8192 tg64 inf                    113.53          114.02     +0.4%   0.9631  no difference
+d4096 pp512 tg64 inf                  690.53          107.43    -84.4%   0.3670  no difference
+d4096 pp2048 tg64 inf                 103.09          102.93     -0.2%   0.9789  no difference
+d4096 pp8192 tg64 inf                  93.35          101.86     +9.1%   0.2936  no difference
+
+1 statistically significant difference(s) at alpha=0.05.
+Rows marked 'no difference' are not evidence of equivalence -- they may just be underpowered; raise --runs or use --target-ci, or pass --equivalence-margin
+to test for equivalence directly.
+
+Commands:
+  llm-assay.py tune http://<model-server-ip>:8080/v1 --json
+  llm-assay.py --base-url http://<model-server-ip>:8080/v1 --model /models/qwen38fn-awq-g32 --served-model-name qwen3.8 --pp 512 2048 8192 --tg 64 --exact-tg --depth 0 4096 --runs 5 --latency-mode generation --seed 32665 --save-result results/ab-gmu95/before.json
+  llm-assay.py --base-url http://<model-server-ip>:8080/v1 --model /models/qwen38fn-awq-g32 --served-model-name qwen3.8 --pp 512 2048 8192 --tg 64 --exact-tg --depth 0 4096 --runs 5 --latency-mode generation --seed 32665 --save-result results/ab-gmu95/after.json
+  llm-assay.py compare results/ab-gmu95/before.json results/ab-gmu95/after.json --metric pp_throughput
+  llm-assay.py compare results/ab-gmu95/before.json results/ab-gmu95/after.json --metric tg_throughput
