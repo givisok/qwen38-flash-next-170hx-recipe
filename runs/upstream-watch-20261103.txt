@@ -1,0 +1,117 @@
+# Upstream watch — 2026-11-03 (vLLM, exllamav3, HF quants)
+# Scan triggered by user ask ("что появилось интересного"). API-based, plus a
+# live probe on OUR prod (MTP-4 @0.95) for the one finding that could apply
+# directly. Probe: tools/prefix_probe.py (4 unique bodies, each sent twice,
+# identical; usage.prompt_tokens_details.cached_tokens + /metrics deltas).
+
+## 1. TOP FINDING: our prod loses prefix-cache DEPTH on replays (bug live here)
+
+Upstream PR vllm-project/vllm#52244 "[Bugfix][V1] Restore hybrid GDN
+prefix-cache hits under MTP spec decoding" (open, upd 2026-11-03) describes
+exactly our stack class: hybrid GDN target + MTP drafter. On Qwen3.5-122B they
+measure replays that never reach the possible hit depth, and prompts whose
+length is a multiple of the hash unit get NO hit at all. Root cause: lookup
+caps at prompt_len-1, the MTP/EAGLE drafter rewinds one more hash unit, but
+the producer publishes the GDN state at the prompt's own tail boundary
+(prompt_len // unit * unit) which is at/above the cap -> the recurrent state
+cannot resume at the hit point.
+
+Our probe on prod (MTP-4 @0.95, thinking off, temp 0, bodies = RU filler +
+unique header per tag; block-hash chains make cross-tag hits implausible):
+
+tag  prompt   1st send   REPLAY cached   depth
+A     4773        0          2368         50%
+B     5152     1728          4752         92%
+C     7115        0          5184         73%
+D     8230        0          5184         63%   <- hard cap, same value as C
+
+- C and D BOTH stop at exactly 5184 = 3x1728 = 6x864 (our GDN page is 1728,
+  MIXED_PREFILL_CHUNK is 864) -> a systematic ceiling, not noise.
+- A (below the ceiling) still loses half its depth.
+- /metrics prefix_cache_hits_total deltas match usage numbers exactly.
+
+Cost in real traffic: every same-context turn (the agent pattern: history +
+new tail) re-prefills 8-50% of an already-cached context. On a 25k-token
+neighbor context that is 2-12k tokens of avoidable prefill -> feeds the
+"prefill-storm neighbor" decode collapse documented in storm-ab-20261102.txt.
+So fixing depth also softens the storm for same-session agents.
+
+Candidate job (needs user word): read the fork's prefix-cache handles
+(g4bwy prefix-cache + LPT2048; the 5184=3-page cap may be a fork knob, not
+the upstream bug), port the #52244 mechanics if that is what we have, then
+reboot + full battery. Not started.
+
+## 2. vLLM: an active DFlash wave (all OPEN unless noted), updated 11-01..11-03
+
+- #64611 Core/SpecDecode: drafter's KV gets its OWN block pool (+1881/-132).
+  RFC #59117 measures on a GDN target with a 5-layer DFlash drafter: the
+  shared-pool layout costs 3-11x KV capacity. If/when merged, our dflash-lane
+  pool (now 5.29M) grows substantially. Stacked on #64109 (back only the tail
+  of the drafter's sliding-window KV) and #64628 (--max-num-inflight-kv-loads).
+- #64059 Bugfix: DFlash draft acceptance 0.0000 with FULL CUDA graphs (stale
+  kernel block table); fix maps draft block tables before FULL replay.
+  NOT our case (our graphs path works, acc 1.79 @1M) — matters at sweep time.
+- #65236 SpecDecode: draft_lm_head_quantization for DFlash — the W4A16 draft
+  head we hand-patched is being upstreamed (their case: 6ms of 120ms step
+  on CPU from a big vocab head).
+- #58633 Perf: DFlash padding loops own block width — author explicitly says
+  kernel-level only, NO end-to-end throughput claim.
+- #61353 Bugfix: DFlash capture on FLEX_ATTENTION + honor drafter enforce_eager.
+- #53929 SpecDecode: adaptive DSpark verification for Qwen GDN (open, upd
+  11-02) — this is the GDN-AV path the maintainer named in #56088 as the way
+  the drafter gate opens.
+- #61728 (+base #59279, both open): Qwen4Exp QSA DCP follow-ups, explicitly
+  "mainly on the sm_80 (A100) path", incl. an MTP decode path and QSA capture
+  fix for spec decode. We run pp3 (not DCP) today — watch, don't chase.
+
+MERGED into main in the last ~2 weeks (dflash family; will ride the next
+release/sweep):
+- #54163 (10-22) DFlash/DSpark no longer drop the LAST prefix-cache block
+  (mamba align context recompute) — same family as finding #1.
+- #59468 (10-16) don't reserve DFlash/DSpark draft slots in the scheduler
+  token budget.
+- #63436 (10-26) run the aux hidden-state FC in the draft dtype.
+- #63001 (10-24) load ModelOpt mixed-precision DFlash/DSpark drafts.
+- #63819 (10-28) MRV2: close DFlash/DSpark adaptive-verification JIT warmup gaps.
+- #60339 (11-03) suffix-decoding speculator merged — MRV2-only; our agent
+  traffic (re-read files) is its ideal case, arrives with the big sweep.
+
+Gate watch (issue #56088, Qwen4Exp serving DFlash/DSpark): maintainer reply
+2026-10-12 — "MRV2 is the path forward, V1 support shouldn't block these
+fixes; DFlash/DSpark can run with adaptive verification off; would you like
+to open PRs for the remaining fixes". Our fix-PR #56295 still untouched since
+09-11. Sweep trigger stays: first merge of the dflash KV-pool family or GDN AV.
+
+## 3. Releases
+
+v0.33.0rc3 published 2026-11-02. NONE of the interesting open PRs above are
+in it. Sweep not triggered by the release itself.
+
+## 4. HuggingFace
+
+- lilligant-real/Qwen3.8-Flash-Next-Uncensored-exl3-4bpw-crucible (11-02):
+  the EXL3 conversion of the UNCENSORED base EXISTS now — removes the
+  "convert leoncca ourselves" half of our EXL3 shelf. Engine still absent
+  (vLLM #19896 closed, no PR; exllamav3 at v1.6.6, 2026-10-31). Shelf waits.
+- intel-ai/Qwen3.8-Flash-Next-MXFP4-BF16Attn-{BF16MTP,MXFP8MTP}-PLEMXFP8-
+  MXFP8HC-CT-AutoRound (11-02): official Intel quants; MXFP4 is not sm80 —
+  skip. Signal worth noting: they also keep MTP in BF16 (our bf16-mamba
+  choice mirrors an official recipe).
+- halt95 W4A16-Merlin (dl=1223) + Swift-1.5 finetunes on the Flash-Next base:
+  model-QUALITY candidates, not serving changes; checkpoint rule (leoncca
+  uncensored) unchanged without a separate decision.
+- leoncca NVFP4/FP4-QSA + FP8-KV scales (10-25): Blackwell-only, skip.
+
+## 5. Closed unmerged (dead ends)
+
+- #62604 sharded greedy verification (closed 10-20, not merged; TP-focused,
+  we are TP1 anyway).
+- #42775 opt-in draft vocab padding (closed 11-03, not merged) — the
+  "dynamic draft-vocab" shelf item is dead again.
+
+## Verdict
+
+Nothing to pull TODAY (zero of the interesting PRs merged). The actionable
+item is internal: fix prefix-cache replay depth in our fork (finding #1) —
+prefill speed for every same-context turn AND less storm for neighbors.
+EXL3 shelf got cheaper (artifact exists, engine still missing).
