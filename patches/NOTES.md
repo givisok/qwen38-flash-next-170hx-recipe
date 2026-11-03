@@ -561,3 +561,23 @@ same protocol); dflash keeps the solo-code crown (sparkDash 253-257 vs
 solo code below 250k in exchange for 2.8x decode at 512k-1M and no
 compaction cliff for long agent sessions. Rollback: SPEC_MODE=dflash
 (launcher default) or MTP-3 via the base yml.
+
+## prefix-replay-depth.diff (2026-11-03, port of upstream vllm#52244 mechanics)
+
+First replay of a just-cached prompt hit only 50-92% of its depth (hard
+5184-token ceiling on longer prompts = 3 GDN pages). Three definitions of
+"where a replay lands" disagreed on the unit: lookups land at the prefix
+hash unit (16), the mamba transient checkpoints were recorded 16 below the
+chunk end (lookahead) and evicted, and the completion caching pass arrived
+at boundary+3 (re-prefillable spec tail) so the landing was never keyed on
+the first pass — the second replay's own pass keyed it, i.e. the cache was
+always one send late. Fix: accept the completion pass and key AT the
+landing (mamba), register the (prompt_len-1) hash landing (attention, for
+prompts ending on a block boundary), and retain fine-grained replay
+boundaries in the coordinator. After: 100% depth on the first replay at
+all probe sizes (8208/8230 etc.), pool/acceptance/solo/N=6/needle gates
+unchanged (greedy x2 non-identity is the older int8-hop trait, recorded
+2026-10-28). Full story + data: runs/prefix-replay-fix-20261103.txt;
+probes: scripts/prefix_probe.py, scripts/depth_diag_probe.py,
+scripts/greedy_gate3.py. Env-gated [rekey-diag] added under
+VLLM_CACHE_DIAG=1.

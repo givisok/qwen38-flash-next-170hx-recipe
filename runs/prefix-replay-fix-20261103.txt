@@ -1,0 +1,79 @@
+# Prefix-cache replay DEPTH fix — 2026-11-03 (prod MTP-4, hybrid GDN)
+# Patch: patches/prefix-replay-depth.diff (fork commits 8a63b11..HEAD)
+# Probes: scripts/prefix_probe.py, scripts/depth_diag_probe.py,
+#         scripts/greedy_gate3.py. Upstream class: vllm-project/vllm#52244.
+
+## Symptom (before)
+Identical resend of a just-prefilled prompt hit the cache far below its depth:
+  depth_diag (8231-token body, 3 sends): 0 -> 5184 -> 8208 tok
+  prefix_probe (4 unique bodies):
+    A  4773 tok -> 2368 (50%)   B  5152 -> 4752 (92%)
+    C  7115 tok -> 5184 (73%)   D  8230 -> 5184 (63%)   <- hard ceiling 3x1728
+Every same-context agent turn re-prefilled 8-50% of an already-cached prompt;
+on a 25k neighbor that is 2-12k avoidable prefill tokens = storm fuel.
+
+## Root cause (unit mismatch across the publish/lookup chain)
+Runtime: block 1728, prefix_match_unit 16 (fine-grained lookups), MTP-4
+(drop_eagle=True), mamba align mode, retention interval 17280.
+1. The LOOKUP lands at the hash unit: cap (prompt_len-1), then one hash unit
+   of eagle rewind -> 8208 on an 8231 prompt. The attention group already
+   registered and hit at that depth.
+2. The mamba PUBLISHER never keyed the landing on the first pass:
+   - allocate_slots records transient checkpoints at (chunk_end+lookahead
+     floored) - 16 -> 8192 for the 8208-chunk: never equal to the prompt
+     boundary (8208), so the transient branch evicted the block instead of
+     keeping it (and took the 6912 full-block hash with it);
+   - the FALLBACK re-key path (which does key the landing, blocks[
+     cdiv(8208,1728)-1]) only accepted num_tokens == boundary exactly, but
+     the final caching pass arrives at boundary+3 (the re-prefillable spec
+     tail is excluded from cacheable tokens) -> rejected every time.
+   Net surviving entry after a cold prefill: the coarse retained state at
+   5184 (get_replay_boundaries' resend - block). The second replay's own
+   pass happened to key the landing (its chunks start from the hit), which
+   is why the third send hit 8208 — the system self-healed one send late.
+3. get_replay_boundaries retained only coarse (resend - 1728) states.
+
+## Fix (3 pieces, mirrors upstream #52244 mechanics)
+- MambaManager._cache_partial_tail_block: accept the COMPLETION caching pass
+  (boundary < num_tokens <= prompt_len) and key AT the landing boundary on
+  blocks[cdiv(boundary, block)-1]; decode passes stay excluded.
+- FullAttentionManager._cache_partial_tail_block: also register the
+  (prompt_len-1) hash-boundary landing (deepest first) so prompts ending on
+  a block boundary keep a reachable tail entry.
+- KVCacheCoordinator.get_replay_boundaries: also emit fine-grained landings
+  at min(hash_block_size, scheduler_block_size).
+Plus an env-gated [rekey-diag] log (VLLM_CACHE_DIAG=1).
+
+## After (clean prod boot, CACHE_DIAG off)
+  depth_diag: 0 -> 8208 -> 8208   (first replay full-depth)
+  prefix_probe: A 4752/4773 (100%), B 5136/5152 (100%),
+                C 7088/7115 (100%), D 8208/8230 (100%)
+  (the residual ~0.4% = last block + one hash unit recomputed for logits —
+  the healthy ceiling, cf. #52244's table.)
+
+## Gates (no regression)
+- Pool: 5,282,636 tok / 5.04x — identical to pre-fix boot.
+- Solo TG code battery: py 150.6, rust 181.4, edit 177.3, sql 268.3 tok/s;
+  acceptance 66.3% / 3.65 per step — normal MTP-4 range.
+- N=6 aggregate: 606 tok/s, acceptance 64.8% — normal.
+- Cold prefill 32k: TTFT 12.1-12.2 s (~2.63k tok/s) — unchanged.
+- Needle 64k: found. Deep-replay exact recall: secret CODE-99042 recalled
+  identically cold and from the 8208 landing.
+- Greedy x2/x3 byte-identity: 1/3 identical today — pre-existing stack
+  trait (int8 PP hop; recorded 2026-10-28 and in the 2026-11-02 batteries
+  as "not byte-identical"), not introduced by this patch. Deep-resume state
+  is functionally exact (needle + secret gates).
+- Unit tests (throwaway container): prefix-cache suite 184 passed both
+  before and after; the 5 pre-existing failures are identical with and
+  without the patch (fork/tests divergence, older than this work).
+
+## Operational notes
+- Deployed by rerunning run-qwen38fn.sh (bind-mounted fork files; no image
+  rebuild). Boot ~7 min as usual.
+- TRAP hit once: launching run-qwen38fn.sh from a wrong cwd made docker
+  auto-create EMPTY DIRECTORIES at the missing config path (/opt/stack.yml
+  "Is a directory" crash loop). Always `cd /root/qwen38fn` first; cleaned
+  /root/configs/* artifacts after.
+- Iterations used CACHE_DIAG=1 (boot env of the launcher) — [hit-diag] /
+  [cache-diag] / [rekey-diag] pinpointed the failing group in one pass.
+  Final prod boot runs with diagnostics off.
