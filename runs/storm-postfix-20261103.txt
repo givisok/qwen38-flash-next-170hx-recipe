@@ -1,0 +1,31 @@
+# Storm re-test on the FIXED prod (MTP-4 @0.95 + prefix-replay-depth fix)
+# 2026-11-03, user ask: "прифил идёт и другой агент делает запрос — генерация
+# сильно падает". Probes: storm_probe2.py (SOLO / partial-MISS / HIT / PAIR),
+# storm_probe3.py (TRUE-MISS: nonce first, whole hash chain poisoned).
+# A = RU analysis stream (1500 tok, thinking off, temp 0.6); B = ~25k-token
+# neighbor prompts x5.
+
+## Results
+phase                      B sends (wall)      A overall      A during-B
+SOLO                       -                   137.2 tok/s    -
+STORM partial-MISS*        3.9 / 1.0 x4         84.0 (61%)      7.9 tok/s
+STORM HIT (same body)      1.0 / 0.3 x4        117.3 (85%)     23.6 tok/s
+STORM TRUE-MISS            4.0-4.2 x5           58.7 (43%)      4.5 tok/s
+PAIR (2 decoders)          -                 120.3 / 130.1     -
+
+* nonce in the TAIL: the shared RU body still prefix-hits (4 of 5 sends are
+  replays of the shared middle). Not a real miss — kept for contrast.
+
+## Reading
+1. The prefix-depth fix pays exactly where expected: a HIT neighbor (same
+   session / same files re-read) now costs 0.3s per send (was ~1.0s with
+   shallow hits) and A keeps 85% of solo (117.3 vs 137.2).
+2. A TRUE-MISS neighbor (agent cold-reads NEW big contexts every time)
+   still collapses A to 43% of solo (58.7) and ~4.5 tok/s inside each
+   prefill chunk — the 2026-11-02 stack property, untouched by the cache
+   fix (a miss has nothing to hit). This is what the user felt.
+3. Two decoders without prefill still scale near-perfectly (120-130).
+4. Remaining lever (shelf, unchanged): MIXED_PREFILL_CHUNK 864 -> 432 —
+   halves the prefill monopolization quantum, ~2x more decode slots per
+   neighbor token; cost = cold-prefill throughput. One reboot to A/B with
+   this exact probe pair.
