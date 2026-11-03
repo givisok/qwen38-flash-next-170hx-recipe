@@ -1,0 +1,1486 @@
+diff --git a/vllm/compilation/breakable_cudagraph.py b/vllm/compilation/breakable_cudagraph.py
+index b70fe70d8c..86f14a970f 100644
+--- a/vllm/compilation/breakable_cudagraph.py
++++ b/vllm/compilation/breakable_cudagraph.py
+@@ -29,7 +29,7 @@ import logging
+ import threading
+ import weakref
+ from collections.abc import Callable
+-from typing import Any, ClassVar, TypeVar
++from typing import Any, ClassVar, TypeVar, overload
+ 
+ import torch
+ 
+@@ -64,7 +64,19 @@ def _weak_ref_capture_arg(arg: Any) -> Any:
+     return weak_ref_tensor(arg)
+ 
+ 
+-def eager_break_during_capture(fn: F) -> F:
++@overload
++def eager_break_during_capture(fn: F) -> F: ...
++
++
++@overload
++def eager_break_during_capture(
++    *, capturable: Callable[..., bool]
++) -> Callable[[F], F]: ...
++
++
++def eager_break_during_capture(
++    fn: F | None = None, *, capturable: Callable[..., bool] | None = None
++) -> Any:
+     """Decorator that turns a custom-op Python kernel into a "break point"
+     for the breakable cudagraph capture.
+ 
+@@ -94,9 +106,19 @@ def eager_break_during_capture(fn: F) -> F:
+         @maybe_transfer_kv_layer
+         def unified_attention_with_output(...):
+             ...
++
++    **Capturable calls.** ``capturable``, if given, is called with the op's
++    arguments inside a capture. When it returns True the op runs inline and
++    is captured into the current segment, so it must then obey the CUDA graph
++    contract: the same launches and tensor addresses for every batch that
++    replays the segment. Use as ``@eager_break_during_capture(capturable=...)``.
+     """
+     if not is_breakable_cudagraph_enabled():
++        if fn is None:
++            return lambda f: f
+         return fn
++    if fn is None:
++        return functools.partial(eager_break_during_capture, capturable=capturable)
+ 
+     @functools.wraps(fn)
+     def wrapper(*args: Any, **kwargs: Any) -> Any:
+@@ -105,6 +127,8 @@ def eager_break_during_capture(fn: F) -> F:
+             return fn(*args, **kwargs)
+         if not capture._capturing:
+             return fn(*args, **kwargs)
++        if capturable is not None and capturable(*args, **kwargs):
++            return fn(*args, **kwargs)
+         if is_forward_context_available():
+             mode = get_forward_context().cudagraph_runtime_mode
+             if mode == CUDAGraphMode.FULL:
+@@ -203,10 +227,20 @@ class BreakableCUDAGraphCapture:
+         Replay does not return values; callers should propagate any
+         downstream dependencies via static output buffers.
+         """
+-        self._end_segment()
+-        result = fn()
++        result = self.run_uncaptured(fn)
+         self.segments.append(fn)
+         self._num_eager_breaks += 1
++        return result
++
++    def run_uncaptured(self, fn: Callable[[], Any]) -> Any:
++        """End the current capture segment, run ``fn`` eagerly once without
++        recording it for replay, and start a new segment.
++
++        For warm-ups that cannot run inside a capture, such as the Triton JIT
++        compile and autotune of a kernel the next segment captures.
++        """
++        self._end_segment()
++        result = fn()
+         self._begin_segment()
+         return result
+ 
+diff --git a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+index 516ef13236..1cb484a77d 100644
+--- a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -2,7 +2,9 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Inference-only Qwen3-Next/Qwen3.5 model."""
+ 
++import functools
+ import os
++from collections.abc import Callable
+ from typing import Literal
+ 
+ import torch
+@@ -13,8 +15,12 @@ from transformers import Qwen3NextConfig
+ from vllm import _custom_ops as ops
+ from vllm import envs
+ from vllm._aiter_ops import rocm_aiter_ops
+-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
++from vllm.compilation.breakable_cudagraph import (
++    BreakableCUDAGraphCapture,
++    eager_break_during_capture,
++)
+ from vllm.config import (
++    CUDAGraphMode,
+     VllmConfig,
+     get_current_vllm_config,
+ )
+@@ -59,13 +65,17 @@ from vllm.third_party.flash_linear_attention.ops import (
+ )
+ from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+ from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
++from vllm.utils.math_utils import cdiv
+ from vllm.utils.torch_utils import (
+     LayerNameType,
+     _encode_layer_name,
+     _resolve_layer_name,
+     direct_register_custom_op,
+ )
+-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
++from vllm.v1.attention.backends.gdn_attn import (
++    CAUSAL_CONV1D_BLOCK_M,
++    GDNAttentionMetadata,
++)
+ 
+ # Optional ROCm AITER Triton kernels for the GDN decode path.
+ # Availability is checked centrally via rocm_aiter_ops; the actual function
+@@ -89,6 +99,24 @@ logger = init_logger(__name__)
+ MAX_FUSED_GDN_MTP_TOKENS = 8
+ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+ 
++# (output norm, input shape, SSM state shape and dtype) of the static GDN cores
++# that already ran once outside a capture, so their Triton kernels are compiled
++# for these arguments (process-wide, as Triton's own cache).
++_STATIC_CORE_WARMED_UP: set[tuple[bool, torch.Size, torch.Size, torch.dtype]] = set()
++
++
++def _captures_static_core(attn_metadata: GDNAttentionMetadata, num_tokens: int) -> bool:
++    """Whether a GDN core runs its static form: inside a breakable PIECEWISE
++    capture (and its uncaptured warm-up), when the builder staged capture
++    buffers that hold ``num_tokens`` tokens."""
++    capture_buffers = attn_metadata.capture_buffers
++    return (
++        capture_buffers is not None
++        and num_tokens <= capture_buffers["non_spec_token_indx"].shape[0]
++        and BreakableCUDAGraphCapture.is_active()
++        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
++    )
++
+ 
+ def _resolve_gdn_prefill_backend(
+     vllm_config: VllmConfig,
+@@ -1365,6 +1393,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+ 
+         assert isinstance(attn_metadata, GDNAttentionMetadata)
+ 
++        if _captures_static_core(attn_metadata, mixed_qkv.shape[0]):
++            forward = functools.partial(
++                self._forward_core_static, mixed_qkv, b, a, core_attn_out, attn_metadata
++            )
++            self._capture_static_core(forward, mixed_qkv, with_output_norm=False)
++            return
++
+         if (
+             self.enable_packed_recurrent_decode
+             and attn_metadata.spec_sequence_masks is None
+@@ -1658,6 +1693,201 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+         else:
+             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+ 
++    def _capture_static_core(
++        self,
++        forward: Callable[[], None],
++        mixed_qkv: torch.Tensor,
++        with_output_norm: bool,
++    ) -> None:
++        """Run ``forward``, a static core, inside a breakable capture.
++
++        The first capture of each form and shape runs it once outside the
++        capture first: its Triton kernels compile there (and autotune if no
++        config is cached), as neither can run inside a capture.
++        """
++        ssm_state = self.kv_cache[1]
++        warm_up_key = (
++            with_output_norm,
++            mixed_qkv.shape,
++            ssm_state.shape,
++            ssm_state.dtype,
++        )
++        if warm_up_key not in _STATIC_CORE_WARMED_UP:
++            _STATIC_CORE_WARMED_UP.add(warm_up_key)
++            capture = BreakableCUDAGraphCapture.current()
++            assert capture is not None
++            capture.run_uncaptured(forward)
++        forward()
++
++    def _forward_core_static(
++        self,
++        mixed_qkv: torch.Tensor,
++        b: torch.Tensor,
++        a: torch.Tensor,
++        core_attn_out: torch.Tensor,
++        attn_metadata: GDNAttentionMetadata,
++    ) -> None:
++        """Branch-free ``_forward_core`` for CUDA graph capture.
++
++        The graph captured for ``num_tokens`` tokens replays for every batch
++        padded to that size, so this reads only ``attn_metadata.capture_buffers``
++        at full length and sizes every grid by ``num_tokens`` and the buffer
++        capacity ``num_seqs``. It always runs the spec decodes, the decodes it
++        peels off the non-spec rows, and the prefills; a part that the batch
++        lacks has only zero-length sequences or pad programs, which exit. Each
++        part runs the kernels that ``_forward_core`` runs for a batch with
++        prefills, and pad rows write only the null state block and a scratch
++        output row.
++        """
++        buffers = attn_metadata.capture_buffers
++        assert buffers is not None
++        num_tokens = mixed_qkv.shape[0]
++        num_seqs = buffers["non_spec_state_indices_tensor"].shape[0]
++        conv_state = (
++            self.kv_cache[0]
++            if is_conv_state_dim_first()
++            else self.kv_cache[0].transpose(-1, -2)
++        )
++        ssm_state = self.kv_cache[1]
++        # (dim, width) view of the (dim, 1, width) weight.
++        conv_weights = self.conv1d.weight.squeeze(1)
++        # Pad rows of the token indices gather token 0.
++        spec_token_indx = buffers["spec_token_indx"][:num_tokens]
++        non_spec_token_indx = buffers["non_spec_token_indx"][:num_tokens]
++
++        # 1. Spec decodes.
++        spec_state_indices = buffers["spec_state_indices_tensor"]
++        spec_query_start_loc = buffers["spec_query_start_loc"]
++        num_accepted_tokens = buffers["num_accepted_tokens"]
++        mixed_qkv_spec = causal_conv1d_update(
++            mixed_qkv.index_select(0, spec_token_indx),
++            conv_state,
++            conv_weights,
++            self.conv1d.bias,
++            self.activation,
++            conv_state_indices=spec_state_indices[:, 0],
++            num_accepted_tokens=num_accepted_tokens,
++            query_start_loc=spec_query_start_loc,
++            max_query_len=spec_state_indices.size(-1),
++            validate_data=False,
++        )
++        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
++        core_attn_out_spec, _ = fused_sigmoid_gating_delta_rule_update(
++            A_log=self.A_log,
++            a=a.index_select(0, spec_token_indx),
++            b=b.index_select(0, spec_token_indx),
++            dt_bias=self.dt_bias,
++            q=query_spec,
++            k=key_spec,
++            v=value_spec,
++            initial_state=ssm_state,
++            inplace_final_state=True,
++            cu_seqlens=spec_query_start_loc,
++            ssm_state_indices=spec_state_indices,
++            num_accepted_tokens=num_accepted_tokens,
++            use_qk_l2norm_in_kernel=True,
++        )
++
++        # 2. Convolution of the non-spec rows.
++        non_spec_state_indices = buffers["non_spec_state_indices_tensor"]
++        non_spec_query_start_loc = buffers["non_spec_query_start_loc"]
++        a_non_spec = a.index_select(0, non_spec_token_indx)
++        b_non_spec = b.index_select(0, non_spec_token_indx)
++        mixed_qkv_non_spec = causal_conv1d_fn(
++            mixed_qkv.index_select(0, non_spec_token_indx).transpose(0, 1),
++            conv_weights,
++            self.conv1d.bias,
++            activation=self.activation,
++            conv_states=conv_state,
++            has_initial_state=buffers["has_initial_state"],
++            cache_indices=non_spec_state_indices,
++            query_start_loc=non_spec_query_start_loc,
++            metadata=attn_metadata,
++            # Each sequence adds at most one partial program.
++            num_programs=cdiv(num_tokens, CAUSAL_CONV1D_BLOCK_M) + num_seqs - 1,
++        ).transpose(0, 1)
++
++        # 3. Decodes peeled off the front of the non-spec rows.
++        decode_query_start_loc = buffers["decode_query_start_loc"]
++        query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
++            mixed_qkv_non_spec
++        )
++        core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
++            A_log=self.A_log,
++            a=a_non_spec,
++            b=b_non_spec,
++            dt_bias=self.dt_bias,
++            q=query_decode,
++            k=key_decode,
++            v=value_decode,
++            initial_state=ssm_state,
++            inplace_final_state=True,
++            cu_seqlens=decode_query_start_loc,
++            ssm_state_indices=non_spec_state_indices,
++            use_qk_l2norm_in_kernel=True,
++        )
++
++        # 4. Prefills, after the decodes in the non-spec rows.
++        query_prefill, key_prefill, value_prefill, g_prefill, beta_prefill = (
++            fused_post_conv_prep(
++                conv_output=mixed_qkv_non_spec,
++                a=a_non_spec,
++                b=b_non_spec,
++                A_log=self.A_log,
++                dt_bias=self.dt_bias,
++                num_k_heads=self.num_k_heads // self.tp_size,
++                head_k_dim=self.head_k_dim,
++                head_v_dim=self.head_v_dim,
++                apply_l2norm=True,
++                output_g_exp=False,
++            )
++        )
++        prefill_state_indices = buffers["prefill_state_indices"]
++        initial_state = ssm_state[prefill_state_indices]
++        initial_state.masked_fill_(
++            ~buffers["prefill_has_initial_state"].view(-1, 1, 1, 1), 0
++        )
++        # Each sequence adds at most one partial chunk.
++        num_chunks = cdiv(num_tokens, FLA_CHUNK_SIZE) + num_seqs - 1
++        core_attn_out_prefill, last_recurrent_state = fla_chunk_gated_delta_rule(
++            q=query_prefill.unsqueeze(0),
++            k=key_prefill.unsqueeze(0),
++            v=value_prefill.unsqueeze(0),
++            g=g_prefill.unsqueeze(0),
++            beta=beta_prefill.unsqueeze(0),
++            initial_state=initial_state,
++            output_final_state=True,
++            cu_seqlens=buffers["non_spec_prefill_query_start_loc"],
++            chunk_indices=buffers["chunk_indices"][:num_chunks],
++            chunk_offsets=buffers["chunk_offsets"],
++            use_qk_l2norm_in_kernel=False,
++            use_graph=True,
++        )
++        ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
++
++        # 5. Merge: each real token takes its part's output; pad rows of the
++        # token indices write a scratch row.
++        rows = torch.arange(num_tokens, device=mixed_qkv.device)
++        core_attn_out_non_spec = torch.where(
++            (rows < decode_query_start_loc[-1]).view(-1, 1, 1),
++            core_attn_out_decode.squeeze(0),
++            core_attn_out_prefill.squeeze(0),
++        )
++        merged = core_attn_out.new_zeros(num_tokens + 1, *core_attn_out.shape[1:])
++        merged.index_copy_(
++            0,
++            torch.where(
++                rows < non_spec_query_start_loc[-1], non_spec_token_indx, num_tokens
++            ),
++            core_attn_out_non_spec,
++        )
++        merged.index_copy_(
++            0,
++            torch.where(rows < spec_query_start_loc[-1], spec_token_indx, num_tokens),
++            core_attn_out_spec.squeeze(0),
++        )
++        core_attn_out.copy_(merged[:num_tokens])
++
+     def _forward_core_decode_aiter(
+         self,
+         qkvz: torch.Tensor,
+@@ -1960,6 +2190,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+             return
+ 
+         assert isinstance(attn_metadata, GDNAttentionMetadata)
++        if _captures_static_core(attn_metadata, mixed_qkv.shape[0]):
++
++            def forward() -> None:
++                self._forward_core_static(mixed_qkv, b, a, core_attn_out, attn_metadata)
++                # The static core writes every row, zeros in pad rows.
++                self._rms_norm_gated_cuda(core_attn_out, output_gate, core_attn_out)
++
++            self._capture_static_core(forward, mixed_qkv, with_output_norm=True)
++            return
+         if (
+             self._can_use_fused_gdn_mtp_decode(attn_metadata)
+             and attn_metadata.num_prefills == 0
+@@ -1987,7 +2226,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+         )
+ 
+ 
+-@eager_break_during_capture
++def _gdn_core_is_capturable(layer_name: LayerNameType, num_tokens: int) -> bool:
++    """Whether a GDN core op is captured in a breakable CUDA graph segment
++    instead of breaking it (see ``_captures_static_core``)."""
++    attn_metadata = get_forward_context().attn_metadata
++    if not isinstance(attn_metadata, dict):
++        return False
++    metadata = attn_metadata.get(_resolve_layer_name(layer_name))
++    return isinstance(metadata, GDNAttentionMetadata) and _captures_static_core(
++        metadata, num_tokens
++    )
++
++
++def _qwen_gdn_attention_core_is_capturable(
++    qkv_or_qkvz: torch.Tensor,
++    b_or_ba: torch.Tensor,
++    a_or_z_out: torch.Tensor,
++    core_attn_out: torch.Tensor,
++    layer_name: LayerNameType,
++    use_aiter: bool = False,
++) -> bool:
++    return not use_aiter and _gdn_core_is_capturable(layer_name, qkv_or_qkvz.shape[0])
++
++
++@eager_break_during_capture(capturable=_qwen_gdn_attention_core_is_capturable)
+ def qwen_gdn_attention_core(
+     qkv_or_qkvz: torch.Tensor,
+     b_or_ba: torch.Tensor,
+@@ -2035,7 +2297,18 @@ direct_register_custom_op(
+ )
+ 
+ 
+-@eager_break_during_capture
++def _qwen_gdn_attention_core_fused_norm_packed_is_capturable(
++    mixed_qkvz: torch.Tensor,
++    ba: torch.Tensor,
++    core_attn_out: torch.Tensor,
++    layer_name: LayerNameType,
++) -> bool:
++    return _gdn_core_is_capturable(layer_name, mixed_qkvz.shape[0])
++
++
++@eager_break_during_capture(
++    capturable=_qwen_gdn_attention_core_fused_norm_packed_is_capturable
++)
+ def qwen_gdn_attention_core_fused_norm_packed(
+     mixed_qkvz: torch.Tensor,
+     ba: torch.Tensor,
+diff --git a/vllm/model_executor/layers/mamba/ops/causal_conv1d.py b/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+index e8254e4f34..3be3edcca1 100644
+--- a/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
++++ b/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+@@ -496,6 +496,7 @@ def causal_conv1d_fn(
+     block_size_to_align=0,
+     metadata=None,
+     validate_data=False,
++    num_programs: int | None = None,
+ ):
+     """Support varlen + continuous batching when x is 2D tensor.
+ 
+@@ -546,6 +547,10 @@ def causal_conv1d_fn(
+         The number of tokens already completed for each sequence
+     block_size_to_align: int
+         The block size to align the cached states to
++    num_programs: int
++        static grid size for CUDA graph capture (needs `metadata`); it must
++        cover the batch, and the extra programs read PAD_SLOT_ID from
++        `metadata.batch_ptr` and exit
+     out: same shape as `x`
+     """
+     if isinstance(activation, bool) and activation:
+@@ -589,6 +594,9 @@ def causal_conv1d_fn(
+     stride_istate_token = 0
+     num_cache_lines = 0
+     BLOCK_M = 8
++    if num_programs is not None:
++        assert metadata is not None
++        assert metadata.nums_dict[BLOCK_M]["tot"] <= num_programs <= batch_ptr.numel()
+     if conv_states is not None:
+         # extensions to support vLLM:
+         # 1. conv_states is used to replaced initial_states
+@@ -701,7 +709,7 @@ def causal_conv1d_fn(
+ 
+     def grid(META):
+         return (
+-            num_program(META, args),
++            num_program(META, args) if num_programs is None else num_programs,
+             triton.cdiv(dim, META["BLOCK_N"]),
+         )
+ 
+diff --git a/vllm/third_party/flash_linear_attention/ops/chunk.py b/vllm/third_party/flash_linear_attention/ops/chunk.py
+index caf8b0c976..261683778d 100644
+--- a/vllm/third_party/flash_linear_attention/ops/chunk.py
++++ b/vllm/third_party/flash_linear_attention/ops/chunk.py
+@@ -33,9 +33,14 @@ def chunk_gated_delta_rule_fwd(
+     chunk_indices: torch.Tensor | None = None,
+     chunk_offsets: torch.Tensor | None = None,
+     core_attn_out: torch.Tensor | None = None,
++    use_graph: bool = False,
+ ):
+     g = chunk_local_cumsum(
+-        g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
++        g,
++        chunk_size=FLA_CHUNK_SIZE,
++        cu_seqlens=cu_seqlens,
++        chunk_indices=chunk_indices,
++        use_graph=use_graph,
+     )
+     # obtain WY representation. u is actually the new v.
+     A = chunk_scaled_dot_kkt_fwd(
+@@ -45,9 +50,14 @@ def chunk_gated_delta_rule_fwd(
+         cu_seqlens=cu_seqlens,
+         chunk_indices=chunk_indices,
+         output_dtype=torch.float32,
++        use_graph=use_graph,
+     )
+     A = solve_tril(
+-        A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, output_dtype=k.dtype
++        A=A,
++        cu_seqlens=cu_seqlens,
++        chunk_indices=chunk_indices,
++        output_dtype=k.dtype,
++        use_graph=use_graph,
+     )
+     w, u = recompute_w_u_fwd(
+         k=k,
+@@ -57,6 +67,7 @@ def chunk_gated_delta_rule_fwd(
+         g_cumsum=g,
+         cu_seqlens=cu_seqlens,
+         chunk_indices=chunk_indices,
++        use_graph=use_graph,
+     )
+     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+         k=k,
+@@ -79,6 +90,7 @@ def chunk_gated_delta_rule_fwd(
+         cu_seqlens=cu_seqlens,
+         chunk_indices=chunk_indices,
+         core_attn_out=core_attn_out,
++        use_graph=use_graph,
+     )
+     if SUPPRESS_LEVEL < 3:
+         return g, o, A, final_state, None, None, None
+@@ -105,6 +117,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
+         chunk_offsets: torch.Tensor | None = None,
+         use_qk_l2norm_in_kernel: bool = False,
+         core_attn_out: torch.Tensor | None = None,
++        use_graph: bool = False,
+     ):
+         if use_qk_l2norm_in_kernel:
+             q = l2norm_fwd(q)
+@@ -123,6 +136,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
+             chunk_indices=chunk_indices,
+             chunk_offsets=chunk_offsets,
+             core_attn_out=core_attn_out,
++            use_graph=use_graph,
+         )
+         ctx.scale = scale
+         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+@@ -149,6 +163,7 @@ def chunk_gated_delta_rule(
+     chunk_offsets: torch.Tensor | None = None,
+     use_qk_l2norm_in_kernel: bool = False,
+     core_attn_out: torch.Tensor | None = None,
++    use_graph: bool = False,
+ ):
+     r"""
+     Args:
+@@ -174,6 +189,12 @@ def chunk_gated_delta_rule(
+         cu_seqlens (torch.Tensor):
+             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+             consistent with the FlashAttention API.
++        use_graph (bool):
++            Launch fixed-capacity grids for CUDA graph capture, as in FLA #1212.
++            `cu_seqlens` may end with zero-length sequences (repeated final offset), so
++            `N` is the static sequence capacity, and `chunk_indices` may end with
++            `[-1, 0]` rows that the chunk kernels skip. Output rows that no sequence
++            covers are left undefined. Default: `False`.
+     Returns:
+         o (torch.Tensor):
+             Outputs of shape `[B, T, H, V]`.
+@@ -241,5 +262,6 @@ def chunk_gated_delta_rule(
+         chunk_offsets,
+         use_qk_l2norm_in_kernel,
+         core_attn_out,
++        use_graph,
+     )
+     return o, final_state
+diff --git a/vllm/third_party/flash_linear_attention/ops/chunk_o.py b/vllm/third_party/flash_linear_attention/ops/chunk_o.py
+index 0c323b8ce2..f14b32e879 100644
+--- a/vllm/third_party/flash_linear_attention/ops/chunk_o.py
++++ b/vllm/third_party/flash_linear_attention/ops/chunk_o.py
+@@ -59,6 +59,7 @@ def chunk_fwd_kernel_o(
+     BV: tl.constexpr,
+     USE_G: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+ ):
+     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+     i_b, i_h = i_bh // H, i_bh % H
+@@ -69,6 +70,8 @@ def chunk_fwd_kernel_o(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -149,6 +152,7 @@ def chunk_fwd_o(
+     chunk_indices: torch.Tensor | None = None,
+     chunk_size: int = FLA_CHUNK_SIZE,
+     core_attn_out: torch.Tensor | None = None,
++    use_graph: bool = False,
+ ) -> torch.Tensor:
+     B, T, Hg, K, V = *q.shape, v.shape[-1]
+     H = v.shape[-2]
+@@ -186,5 +190,6 @@ def chunk_fwd_o(
+         K=K,
+         V=V,
+         BT=BT,
++        USE_GRAPH=use_graph,
+     )
+     return o
+diff --git a/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py b/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py
+index 10ff970c80..7927462a32 100644
+--- a/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py
++++ b/vllm/third_party/flash_linear_attention/ops/chunk_scaled_dot_kkt.py
+@@ -58,6 +58,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
+     BT: tl.constexpr,
+     BK: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     USE_G: tl.constexpr,
+     CAST_DOT_TO_K_DTYPE: tl.constexpr,
+ ):
+@@ -68,6 +69,8 @@ def chunk_scaled_dot_kkt_fwd_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -124,6 +127,7 @@ def chunk_scaled_dot_kkt_fwd(
+     chunk_indices: torch.Tensor | None = None,
+     chunk_size: int = FLA_CHUNK_SIZE,
+     output_dtype: torch.dtype = torch.float32,
++    use_graph: bool = False,
+ ) -> torch.Tensor:
+     r"""
+     Compute beta * K * K^T.
+@@ -172,5 +176,6 @@ def chunk_scaled_dot_kkt_fwd(
+         K=K,
+         BT=BT,
+         CAST_DOT_TO_K_DTYPE=_CAST_DOT_TO_K_DTYPE,
++        USE_GRAPH=use_graph,
+     )
+     return A
+diff --git a/vllm/third_party/flash_linear_attention/ops/cumsum.py b/vllm/third_party/flash_linear_attention/ops/cumsum.py
+index b0820104b1..f91ca5a229 100644
+--- a/vllm/third_party/flash_linear_attention/ops/cumsum.py
++++ b/vllm/third_party/flash_linear_attention/ops/cumsum.py
+@@ -35,6 +35,7 @@ def chunk_local_cumsum_scalar_kernel(
+     BT: tl.constexpr,
+     REVERSE: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     HEAD_FIRST: tl.constexpr,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+@@ -44,6 +45,8 @@ def chunk_local_cumsum_scalar_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -94,6 +97,7 @@ def chunk_local_cumsum_vector_kernel(
+     BS: tl.constexpr,
+     REVERSE: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     HEAD_FIRST: tl.constexpr,
+ ):
+     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+@@ -103,6 +107,8 @@ def chunk_local_cumsum_vector_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -165,6 +171,7 @@ def chunk_local_cumsum_scalar(
+     chunk_indices: torch.Tensor | None = None,
+     head_first: bool = False,
+     output_dtype: torch.dtype | None = torch.float,
++    use_graph: bool = False,
+ ) -> torch.Tensor:
+     if head_first:
+         B, H, T = g.shape
+@@ -190,6 +197,7 @@ def chunk_local_cumsum_scalar(
+         BT=BT,
+         HEAD_FIRST=head_first,
+         REVERSE=reverse,
++        USE_GRAPH=use_graph,
+     )
+     return g
+ 
+@@ -202,6 +210,7 @@ def chunk_local_cumsum_vector(
+     chunk_indices: torch.Tensor | None = None,
+     head_first: bool = False,
+     output_dtype: torch.dtype | None = torch.float,
++    use_graph: bool = False,
+ ) -> torch.Tensor:
+     if head_first:
+         B, H, T, S = g.shape
+@@ -235,6 +244,7 @@ def chunk_local_cumsum_vector(
+         BT=BT,
+         HEAD_FIRST=head_first,
+         REVERSE=reverse,
++        USE_GRAPH=use_graph,
+     )
+     return g
+ 
+@@ -248,6 +258,7 @@ def chunk_local_cumsum(
+     chunk_indices: torch.Tensor | None = None,
+     head_first: bool = False,
+     output_dtype: torch.dtype | None = torch.float,
++    use_graph: bool = False,
+     **kwargs,
+ ) -> torch.Tensor:
+     if cu_seqlens is not None:
+@@ -263,6 +274,7 @@ def chunk_local_cumsum(
+             chunk_indices,
+             head_first,
+             output_dtype,
++            use_graph,
+         )
+     elif len(g.shape) == 4:
+         return chunk_local_cumsum_vector(
+@@ -273,6 +285,7 @@ def chunk_local_cumsum(
+             chunk_indices,
+             head_first,
+             output_dtype,
++            use_graph,
+         )
+     else:
+         raise ValueError(
+diff --git a/vllm/third_party/flash_linear_attention/ops/solve_tril.py b/vllm/third_party/flash_linear_attention/ops/solve_tril.py
+index 8d3811ca4c..e48ee122b1 100644
+--- a/vllm/third_party/flash_linear_attention/ops/solve_tril.py
++++ b/vllm/third_party/flash_linear_attention/ops/solve_tril.py
+@@ -45,6 +45,7 @@ def solve_tril_16x16_kernel(
+     BT: tl.constexpr,
+     USE_TMA: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     DOT_PRECISION: tl.constexpr,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+@@ -54,6 +55,8 @@ def solve_tril_16x16_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -120,6 +123,7 @@ def merge_16x16_to_32x32_inverse_kernel(
+     BT: tl.constexpr,
+     USE_TMA: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     DOT_PRECISION: tl.constexpr,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+@@ -129,6 +133,8 @@ def merge_16x16_to_32x32_inverse_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -245,6 +251,7 @@ def merge_16x16_to_64x64_inverse_kernel(
+     BT: tl.constexpr,
+     USE_TMA: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+     DOT_PRECISION: tl.constexpr,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+@@ -254,6 +261,8 @@ def merge_16x16_to_64x64_inverse_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -509,6 +518,7 @@ def solve_tril(
+     cu_seqlens: torch.Tensor | None = None,
+     chunk_indices: torch.Tensor | None = None,
+     output_dtype: torch.dtype = torch.float,
++    use_graph: bool = False,
+ ) -> torch.Tensor:
+     """
+     Compute the inverse of the matrix I + A
+@@ -554,5 +564,6 @@ def solve_tril(
+         BT=BT,
+         USE_TMA=is_tma_supported,
+         DOT_PRECISION=FLA_TRIL_PRECISION,
++        USE_GRAPH=use_graph,
+     )
+     return Ai
+diff --git a/vllm/third_party/flash_linear_attention/ops/wy_fast.py b/vllm/third_party/flash_linear_attention/ops/wy_fast.py
+index 52d2b28195..b87c743802 100644
+--- a/vllm/third_party/flash_linear_attention/ops/wy_fast.py
++++ b/vllm/third_party/flash_linear_attention/ops/wy_fast.py
+@@ -45,6 +45,7 @@ def recompute_w_u_fwd_kernel(
+     BK: tl.constexpr,
+     BV: tl.constexpr,
+     IS_VARLEN: tl.constexpr,
++    USE_GRAPH: tl.constexpr,
+ ):
+     i_t, i_bh = tl.program_id(0), tl.program_id(1)
+     i_b, i_h = i_bh // H, i_bh % H
+@@ -53,6 +54,8 @@ def recompute_w_u_fwd_kernel(
+             tl.load(chunk_indices + i_t * 2).to(tl.int32),
+             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+         )
++        if USE_GRAPH and i_n < 0:
++            return
+         bos, eos = (
+             tl.load(cu_seqlens + i_n).to(tl.int32),
+             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+@@ -124,6 +127,7 @@ def recompute_w_u_fwd(
+     A: torch.Tensor,
+     cu_seqlens: torch.Tensor | None,
+     chunk_indices: torch.Tensor | None = None,
++    use_graph: bool = False,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     B, T, Hg, K, V = *k.shape, v.shape[-1]
+     H = v.shape[-2]
+@@ -154,5 +158,6 @@ def recompute_w_u_fwd(
+         BT=BT,
+         BK=BK,
+         BV=BV,
++        USE_GRAPH=use_graph,
+     )
+     return w, u
+diff --git a/vllm/v1/attention/backends/gdn_attn.py b/vllm/v1/attention/backends/gdn_attn.py
+index 08369adcb1..cdfdce62b0 100644
+--- a/vllm/v1/attention/backends/gdn_attn.py
++++ b/vllm/v1/attention/backends/gdn_attn.py
+@@ -2,18 +2,25 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Backend for GatedDeltaNet attention."""
+ 
++import functools
++from collections.abc import Iterable
+ from dataclasses import dataclass, replace
+-from typing import Literal
++from typing import Any, Literal
+ 
+ import torch
+ 
+ from vllm._aiter_ops import rocm_aiter_ops
++from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
+ from vllm.config import VllmConfig
++from vllm.config.compilation import CUDAGraphMode
++from vllm.logger import init_logger
+ from vllm.model_executor.layers.mamba.checkpoint import (
+     MambaPrefillCheckpointBuilder,
+     MambaPrefillCheckpointMetadata,
+ )
+-from vllm.utils.torch_utils import async_tensor_h2d
++from vllm.platforms import current_platform
++from vllm.utils.math_utils import cdiv
++from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+ from vllm.v1.attention.backend import (
+     AttentionBackend,
+     AttentionCGSupport,
+@@ -28,6 +35,48 @@ from vllm.v1.attention.backends.utils import (
+ )
+ from vllm.v1.kv_cache_interface import MambaSpec
+ 
++logger = init_logger(__name__)
++
++# Tokens per program of causal_conv1d_fn (BLOCK_M).
++CAUSAL_CONV1D_BLOCK_M = 8
++
++# Pad value of each mixed-batch field that build() stages into a persistent
++# buffer; None repeats the last value, so cu_seqlens pads are zero-length
++# sequences. State index pads select the null block.
++MIXED_BATCH_PAD_VALUES: dict[str, int | bool | None] = {
++    "spec_state_indices_tensor": NULL_BLOCK_ID,
++    "non_spec_state_indices_tensor": NULL_BLOCK_ID,
++    "prefill_state_indices": NULL_BLOCK_ID,
++    "spec_query_start_loc": None,
++    "non_spec_query_start_loc": None,
++    "prefill_query_start_loc": None,
++    "num_accepted_tokens": 1,
++    "has_initial_state": False,
++    "prefill_has_initial_state": False,
++    "spec_token_indx": 0,
++    "non_spec_token_indx": 0,
++}
++# Pad value of each field that the captured forward reads from a capture
++# buffer (GDNAttentionMetadata.capture_buffers); None repeats the last value,
++# or is 0 when the batch has no such rows. That forward runs the non-spec rows
++# as one token stream with the decodes it peels off first, so the decode and
++# prefill cu_seqlens index that stream (prefill_query_start_loc is rebased to
++# the prefills instead).
++CAPTURE_PAD_VALUES: dict[str, int | bool | None] = {
++    **{
++        name: pad_value
++        for name, pad_value in MIXED_BATCH_PAD_VALUES.items()
++        if name != "prefill_query_start_loc"
++    },
++    "decode_query_start_loc": None,
++    "non_spec_prefill_query_start_loc": None,
++}
++STATE_INDEX_FIELDS = (
++    "spec_state_indices_tensor",
++    "non_spec_state_indices_tensor",
++    "prefill_state_indices",
++)
++
+ 
+ class GDNAttentionBackend(AttentionBackend):
+     @staticmethod
+@@ -87,6 +136,12 @@ class GDNAttentionMetadata:
+     batch_ptr: torch.Tensor | None = None
+     token_chunk_offset_ptr: torch.Tensor | None = None
+ 
++    # Persistent buffers with the batch's rows and pads after them, for the
++    # forward captured in a breakable CUDA graph, which reads every buffer at
++    # its full length (fields of CAPTURE_PAD_VALUES, FLA chunk_indices and
++    # chunk_offsets). Set when the builder's captures_mixed_batches is True.
++    capture_buffers: dict[str, torch.Tensor] | None = None
++
+ 
+ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+     kv_cache_spec: MambaSpec
+@@ -190,6 +245,86 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             dtype=torch.int32,
+             device=device,
+         )
++        self.mixed_batch_buffers = self._allocate_mixed_batch_buffers(device)
++        # A breakable CUDA graph also captures the GDN core when its static
++        # form applies: Triton/FLA kernels, no prefix-cache checkpoints, MRV2
++        # on CUDA. The graph of a token count replays for every batch of that
++        # count, with or without prefills, so build() then stages every batch.
++        # Mamba "align" mode qualifies when the layer exports no prefill
++        # checkpoint: the scheduler then ends each prefill chunk at a block
++        # boundary, MRV2 moves the state between blocks before the forward,
++        # and the forward reads only the block-aligned state indices.
++        self.captures_mixed_batches = (
++            is_breakable_cudagraph_enabled()
++            and self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
++            and vllm_config.use_v2_model_runner
++            and current_platform.is_cuda()
++            and self.gdn_prefill_backend == "triton"
++            and kv_cache_spec.num_prefill_checkpoint_blocks == 0
++            and type(self) is GDNAttentionMetadataBuilder
++        )
++        logger.info(
++            "[gdn-mixed-capture] static GDN core in piecewise graphs: %s "
++            "(breakable=%s piecewise=%s v2_runner=%s cuda=%s backend=%s "
++            "prefill_ckpt_blocks=%s)",
++            self.captures_mixed_batches,
++            is_breakable_cudagraph_enabled(),
++            self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs(),
++            vllm_config.use_v2_model_runner,
++            current_platform.is_cuda(),
++            self.gdn_prefill_backend,
++            kv_cache_spec.num_prefill_checkpoint_blocks,
++        )
++
++    @functools.cached_property
++    def token_positions(self) -> torch.Tensor:
++        """The non-spec token indices of a batch without spec decodes."""
++        buffer = self.mixed_batch_buffers["non_spec_token_indx"]
++        return torch.arange(buffer.shape[0], device=buffer.device)
++
++    def _allocate_mixed_batch_buffers(
++        self, device: torch.device
++    ) -> dict[str, torch.Tensor]:
++        """Allocate the persistent buffers of batches with prefills.
++
++        They hold the largest batch the scheduler can form, so the metadata of
++        any such batch is a prefix view at a fixed address, and a padded view
++        has valid pad rows (see ``MIXED_BATCH_PAD_VALUES``).
++        """
++        from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
++
++        max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
++        max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
++        # Each sequence adds at most one partial chunk or conv program.
++        max_num_chunks = cdiv(max_num_tokens, FLA_CHUNK_SIZE) + max_num_reqs - 1
++        max_num_conv_programs = (
++            cdiv(max_num_tokens, CAUSAL_CONV1D_BLOCK_M) + max_num_reqs - 1
++        )
++        shapes_and_dtypes = {
++            "spec_state_indices_tensor": ((max_num_reqs, self.num_spec + 1), None),
++            "non_spec_state_indices_tensor": ((max_num_reqs,), None),
++            "prefill_state_indices": ((max_num_reqs,), None),
++            "spec_query_start_loc": ((max_num_reqs + 1,), None),
++            "non_spec_query_start_loc": ((max_num_reqs + 1,), None),
++            "prefill_query_start_loc": ((max_num_reqs + 1,), None),
++            "decode_query_start_loc": ((max_num_reqs + 1,), None),
++            "non_spec_prefill_query_start_loc": ((max_num_reqs + 1,), None),
++            "num_accepted_tokens": ((max_num_reqs,), None),
++            "has_initial_state": ((max_num_reqs,), torch.bool),
++            "prefill_has_initial_state": ((max_num_reqs,), torch.bool),
++            # argsort() makes the token indices int64.
++            "spec_token_indx": ((max_num_tokens,), torch.int64),
++            "non_spec_token_indx": ((max_num_tokens,), torch.int64),
++            "chunk_indices": ((max_num_chunks, 2), None),
++            # prepare_chunk_offsets() makes the offsets int64.
++            "chunk_offsets": ((max_num_reqs + 1,), torch.int64),
++            "batch_ptr": ((max_num_conv_programs,), None),
++            "token_chunk_offset_ptr": ((max_num_conv_programs,), None),
++        }
++        return {
++            name: torch.empty(shape, dtype=dtype or torch.int32, device=device)
++            for name, (shape, dtype) in shapes_and_dtypes.items()
++        }
+ 
+     @staticmethod
+     def _check_chunk_metadata_override(
+@@ -247,18 +382,38 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             prepare_chunk_offsets,
+         )
+ 
++        # Copy them into persistent buffers whose tails are FLA's static-grid
++        # pads: [-1, 0] chunks, which the chunk kernels skip with use_graph,
++        # and offsets of zero-length sequences.
+         assert prefill_query_start_loc_cpu is not None
++        chunk_indices = prepare_chunk_indices(
++            prefill_query_start_loc_cpu, FLA_CHUNK_SIZE
++        )
++        chunk_offsets = prepare_chunk_offsets(
++            prefill_query_start_loc_cpu, FLA_CHUNK_SIZE
++        )
++        buffers = self.mixed_batch_buffers
+         return (
+-            async_tensor_h2d(
+-                prepare_chunk_indices(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
+-                device=device,
+-            ),
+-            async_tensor_h2d(
+-                prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
+-                device=device,
++            self._stage_h2d(buffers["chunk_indices"], chunk_indices, (-1, 0)),
++            self._stage_h2d(
++                buffers["chunk_offsets"], chunk_offsets, int(chunk_offsets[-1])
+             ),
+         )
+ 
++    @staticmethod
++    def _stage_h2d(
++        buffer: torch.Tensor,
++        values: torch.Tensor,
++        pad_value: int | tuple[int, ...],
++    ) -> torch.Tensor:
++        """Copy CPU ``values`` and pads after them into ``buffer`` with one H2D
++        copy; return the view of ``values``."""
++        padded = torch.empty(buffer.shape, dtype=values.dtype, pin_memory=PIN_MEMORY)
++        padded[: len(values)] = values
++        padded[len(values) :] = values.new_tensor(pad_value)
++        async_tensor_h2d(padded, out=buffer)
++        return buffer[: len(values)]
++
+     def build(  # type: ignore[override]
+         self,
+         common_prefix_len: int,
+@@ -266,7 +421,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+         num_accepted_tokens: torch.Tensor | None = None,
+         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+         fast_build: bool = False,
++        cudagraph_mode: CUDAGraphMode | None = None,
+     ) -> GDNAttentionMetadata:
++        """``cudagraph_mode`` is the batch's runtime mode, if the caller knows
++        it. A FULL replay never reads the capture buffers, so a FULL batch
++        skips staging them. PIECEWISE capture builds its metadata with mode
++        NONE, so NONE still stages."""
+         m = common_attn_metadata
+ 
+         query_start_loc = m.query_start_loc
+@@ -512,6 +672,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+                 compute_causal_conv1d_metadata(
+                     non_spec_query_start_loc_cpu,
+                     device=query_start_loc.device,
++                    program_buffers=(
++                        self.mixed_batch_buffers["batch_ptr"],
++                        self.mixed_batch_buffers["token_chunk_offset_ptr"],
++                    ),
+                 )
+             )
+             if spec_sequence_masks is None and num_decodes > 0:
+@@ -543,59 +707,51 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             num_prefills, num_decodes, num_spec_decodes, num_spec_decode_tokens
+         ):
+             assert spec_sequence_masks is not None
+-            self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+-                spec_state_indices_tensor, non_blocking=True
+-            )
+-            spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+-            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+-
+-            self.spec_sequence_masks[:num_spec_decodes].copy_(
+-                spec_sequence_masks[:num_spec_decodes], non_blocking=True
+-            )
+-            spec_sequence_masks = self.spec_sequence_masks[:batch_size]
+-            spec_sequence_masks[num_spec_decodes:].fill_(False)
+-
++            assert spec_state_indices_tensor is not None
++            assert spec_query_start_loc is not None
++            assert num_accepted_tokens is not None
+             assert non_spec_token_indx is not None and spec_token_indx is not None
+-            self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
+-                non_spec_token_indx, non_blocking=True
++            spec_state_indices_tensor = self._stage(
++                self.spec_state_indices_tensor,
++                spec_state_indices_tensor,
++                batch_size,
++                NULL_BLOCK_ID,
+             )
+-            non_spec_token_indx = self.non_spec_token_indx[
+-                : non_spec_token_indx.size(0)
+-            ]
+-
+-            self.spec_token_indx[: spec_token_indx.size(0)].copy_(
+-                spec_token_indx, non_blocking=True
++            spec_sequence_masks = self._stage(
++                self.spec_sequence_masks,
++                spec_sequence_masks[:num_spec_decodes],
++                batch_size,
++                False,
+             )
+-            spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
+-
+-            self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
+-                spec_query_start_loc, non_blocking=True
++            non_spec_token_indx = self._stage(
++                self.non_spec_token_indx, non_spec_token_indx
+             )
+-            spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
+-            spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+-            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+-
+-            self.num_accepted_tokens[:num_spec_decodes].copy_(
+-                num_accepted_tokens, non_blocking=True
++            spec_token_indx = self._stage(self.spec_token_indx, spec_token_indx)
++            spec_query_start_loc = self._stage(
++                self.spec_query_start_loc,
++                spec_query_start_loc,
++                batch_size + 1,
++                spec_query_start_loc[-1],
++            )
++            num_accepted_tokens = self._stage(
++                self.num_accepted_tokens, num_accepted_tokens, batch_size, 1
+             )
+-            num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+-            num_accepted_tokens[num_spec_decodes:].fill_(1)
+ 
+         if self._stage_decode(num_prefills, num_decodes, num_spec_decodes):
+-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+-                non_spec_state_indices_tensor, non_blocking=True
++            assert non_spec_state_indices_tensor is not None
++            assert non_spec_query_start_loc is not None
++            non_spec_state_indices_tensor = self._stage(
++                self.non_spec_state_indices_tensor,
++                non_spec_state_indices_tensor,
++                batch_size,
++                NULL_BLOCK_ID,
+             )
+-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+-                :batch_size
+-            ]
+-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+-
+-            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+-                non_spec_query_start_loc, non_blocking=True
++            non_spec_query_start_loc = self._stage(
++                self.non_spec_query_start_loc,
++                non_spec_query_start_loc,
++                batch_size + 1,
++                non_spec_query_start_loc[-1],
+             )
+-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
+-            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+-            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+ 
+         attn_metadata = GDNAttentionMetadata(
+             num_prefills=num_prefills,
+@@ -627,8 +783,160 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             batch_ptr=batch_ptr,
+             token_chunk_offset_ptr=token_chunk_offset_ptr,
+         )
++        if self.captures_mixed_batches:
++            if cudagraph_mode != CUDAGraphMode.FULL:
++                attn_metadata = self._stage_capture_buffers(
++                    attn_metadata, m, non_spec_query_start_loc_cpu
++                )
++        elif num_prefills > 0:
++            attn_metadata = self._stage_mixed_batch(attn_metadata)
+         return attn_metadata
+ 
++    @staticmethod
++    def _stage(
++        buffer: torch.Tensor,
++        values: torch.Tensor,
++        num_rows: int | None = None,
++        pad_value: int | bool | torch.Tensor = 0,
++    ) -> torch.Tensor:
++        """Copy ``values`` to the front of ``buffer``, fill the rows after
++        them up to ``num_rows`` (default: none) with ``pad_value`` and return
++        ``buffer[:num_rows]``."""
++        num_values = values.shape[0]
++        num_rows = num_values if num_rows is None else num_rows
++        buffer[:num_values].copy_(values, non_blocking=True)
++        buffer[num_values:num_rows].fill_(pad_value)
++        return buffer[:num_rows]
++
++    def _stage_mixed_batch(
++        self,
++        metadata: GDNAttentionMetadata,
++        fields: Iterable[str] = MIXED_BATCH_PAD_VALUES,
++    ) -> GDNAttentionMetadata:
++        """Move the ``fields`` of a batch with prefills into persistent buffers.
++
++        Each field keeps its length, so the eager forward reads the same values
++        and launches the same grids. The buffer rows after it hold the pad from
++        ``MIXED_BATCH_PAD_VALUES``, so a padded view of any length also has
++        valid rows, as a CUDA graph with a static grid needs.
++        """
++        staged: dict[str, Any] = {}
++        for name in fields:
++            values = getattr(metadata, name)
++            if values is None:
++                continue
++            pad_value = MIXED_BATCH_PAD_VALUES[name]
++            buffer = self.mixed_batch_buffers[name]
++            staged[name] = self._stage(
++                buffer,
++                values,
++                buffer.shape[0],
++                values[-1] if pad_value is None else pad_value,
++            )[: values.shape[0]]
++        return replace(metadata, **staged)
++
++    def _stage_capture_buffers(
++        self,
++        metadata: GDNAttentionMetadata,
++        common_attn_metadata: CommonAttentionMetadata,
++        non_spec_query_start_loc_cpu: torch.Tensor | None,
++    ) -> GDNAttentionMetadata:
++        """Stage every buffer that the captured forward reads.
++
++        A batch without prefills replays the same graph, so it also gets the
++        prefill-side metadata: no FLA chunks, causal_conv1d programs and
++        ``has_initial_state`` for its non-spec decodes, if any.
++        """
++        # The captured forward exports no prefill checkpoint.
++        assert metadata.checkpoint is None
++        buffers = self.mixed_batch_buffers
++        # build() staged the FLA chunk metadata of a batch with prefills.
++        chunk_buffers = {
++            name: buffers[name] for name in ("chunk_indices", "chunk_offsets")
++        }
++        m = replace(metadata, capture_buffers=chunk_buffers)
++        if m.num_prefills == 0:
++            self._stage_h2d(
++                buffers["chunk_indices"],
++                torch.empty((0, 2), dtype=buffers["chunk_indices"].dtype),
++                (-1, 0),
++            )
++            buffers["chunk_offsets"].zero_()
++            if non_spec_query_start_loc_cpu is None:
++                non_spec_query_start_loc_cpu = torch.zeros(1, dtype=torch.int32)
++            nums_dict, batch_ptr, token_chunk_offset_ptr = (
++                compute_causal_conv1d_metadata(
++                    non_spec_query_start_loc_cpu,
++                    device=common_attn_metadata.query_start_loc.device,
++                    program_buffers=(
++                        buffers["batch_ptr"],
++                        buffers["token_chunk_offset_ptr"],
++                    ),
++                )
++            )
++            has_initial_state = None
++            if m.non_spec_query_start_loc is not None:
++                # Without spec decodes, every row is a non-spec row.
++                has_initial_state = (
++                    common_attn_metadata.compute_num_computed_tokens() > 0
++                )
++            m = replace(
++                m,
++                nums_dict=nums_dict,
++                batch_ptr=batch_ptr,
++                token_chunk_offset_ptr=token_chunk_offset_ptr,
++                has_initial_state=has_initial_state,
++            )
++        return self._stage_capture_fields(m, self._capture_values(m))
++
++    def _capture_values(
++        self, metadata: GDNAttentionMetadata
++    ) -> dict[str, torch.Tensor | None]:
++        """The rows of each ``CAPTURE_PAD_VALUES`` field: the batch's own,
++        except that the decode and prefill rows are split at the decodes that
++        the forward peels off the non-spec rows (none with spec decodes)."""
++        m = metadata
++        # The fields that only the captured forward reads start empty.
++        values = {name: getattr(m, name, None) for name in CAPTURE_PAD_VALUES}
++        if m.spec_sequence_masks is None:
++            values["non_spec_token_indx"] = self.token_positions
++        if m.non_spec_query_start_loc is not None:
++            assert m.non_spec_state_indices_tensor is not None
++            assert m.has_initial_state is not None
++            values["decode_query_start_loc"] = m.non_spec_query_start_loc[
++                : m.num_decodes + 1
++            ]
++            values["non_spec_prefill_query_start_loc"] = m.non_spec_query_start_loc[
++                m.num_decodes :
++            ]
++            values["prefill_state_indices"] = m.non_spec_state_indices_tensor[
++                m.num_decodes :
++            ]
++            values["prefill_has_initial_state"] = m.has_initial_state[m.num_decodes :]
++        return values
++
++    def _stage_capture_fields(
++        self,
++        metadata: GDNAttentionMetadata,
++        values: dict[str, torch.Tensor | None],
++    ) -> GDNAttentionMetadata:
++        """Copy ``values`` into their capture buffers with pads after them
++        (a missing part is all pads) and record the buffers in
++        ``capture_buffers``. The metadata fields keep their own tensors."""
++        buffers = self.mixed_batch_buffers
++        capture_buffers = dict(metadata.capture_buffers or {})
++        for name, rows in values.items():
++            buffer = buffers[name]
++            if rows is None:
++                rows = buffer[:0]
++            pad_value: int | bool | torch.Tensor | None = CAPTURE_PAD_VALUES[name]
++            if pad_value is None:
++                pad_value = rows[-1] if len(rows) > 0 else 0
++            capture_buffers[name] = self._stage(
++                buffer, rows, buffer.shape[0], pad_value
++            )
++        return replace(metadata, capture_buffers=capture_buffers)
++
+     def _stage_spec_decode(
+         self,
+         num_prefills: int,
+@@ -690,29 +998,41 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+             m.num_prefills, m.num_decodes, m.num_spec_decodes, m.num_spec_decode_tokens
+         ):
+             assert m.spec_state_indices_tensor is not None
+-            batch_size = m.spec_state_indices_tensor.shape[0]
+-            self.spec_state_indices_tensor[: m.num_spec_decodes].copy_(
+-                spec_indices, non_blocking=True
++            assert spec_indices is not None
++            spec_indices = self._stage(
++                self.spec_state_indices_tensor,
++                spec_indices,
++                m.spec_state_indices_tensor.shape[0],
++                NULL_BLOCK_ID,
+             )
+-            spec_indices = self.spec_state_indices_tensor[:batch_size]
+-            spec_indices[m.num_spec_decodes :].fill_(NULL_BLOCK_ID)
+ 
+         if self._stage_decode(m.num_prefills, m.num_decodes, m.num_spec_decodes):
+             assert m.non_spec_state_indices_tensor is not None
+-            batch_size = m.non_spec_state_indices_tensor.shape[0]
+-            self.non_spec_state_indices_tensor[: m.num_decodes].copy_(
+-                non_spec_indices, non_blocking=True
++            assert non_spec_indices is not None
++            non_spec_indices = self._stage(
++                self.non_spec_state_indices_tensor,
++                non_spec_indices,
++                m.non_spec_state_indices_tensor.shape[0],
++                NULL_BLOCK_ID,
+             )
+-            non_spec_indices = self.non_spec_state_indices_tensor[:batch_size]
+-            non_spec_indices[m.num_decodes :].fill_(NULL_BLOCK_ID)
+ 
+-        return replace(
++        metadata = replace(
+             m,
+             spec_state_indices_tensor=spec_indices,
+             non_spec_state_indices_tensor=non_spec_indices,
+             prefill_state_indices=prefill_indices,
+             checkpoint=checkpoint,
+         )
++        if self.captures_mixed_batches:
++            # build() staged no capture buffers for a FULL batch.
++            if m.capture_buffers is not None:
++                values = self._capture_values(metadata)
++                metadata = self._stage_capture_fields(
++                    metadata, {name: values[name] for name in STATE_INDEX_FIELDS}
++                )
++        elif m.num_prefills > 0:
++            metadata = self._stage_mixed_batch(metadata, STATE_INDEX_FIELDS)
++        return metadata
+ 
+     def build_for_cudagraph_capture(
+         self, common_attn_metadata: CommonAttentionMetadata
+diff --git a/vllm/v1/attention/backends/utils.py b/vllm/v1/attention/backends/utils.py
+index f93156d53f..206a7cef2e 100644
+--- a/vllm/v1/attention/backends/utils.py
++++ b/vllm/v1/attention/backends/utils.py
+@@ -1064,9 +1064,15 @@ def create_fast_prefill_custom_backend(
+ 
+ 
+ def compute_causal_conv1d_metadata(
+-    query_start_loc_p_cpu: torch.Tensor, *, device: torch.device
++    query_start_loc_p_cpu: torch.Tensor,
++    *,
++    device: torch.device,
++    program_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
+ ) -> tuple[dict[int, dict[str, Any]], torch.Tensor, torch.Tensor]:
+     # Needed for causal_conv1d. Use the CPU query_start_loc to avoid DtoH sync.
++    # program_buffers: persistent (batch_ptr, token_chunk_offset_ptr) to fill
++    # in place. Entries past the batch's programs are PAD_SLOT_ID, so a static
++    # grid of up to their length is safe.
+     assert query_start_loc_p_cpu.device.type == "cpu"
+     seqlens = query_start_loc_p_cpu.diff()
+     nums_dict: dict[int, dict[str, Any]] = {}
+@@ -1088,7 +1094,11 @@ def compute_causal_conv1d_metadata(
+         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
+         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
+ 
+-        if batch_ptr is None:
++        if program_buffers is not None:
++            batch_ptr, token_chunk_offset_ptr = program_buffers
++            batch_ptr.fill_(PAD_SLOT_ID)
++            token_chunk_offset_ptr.fill_(PAD_SLOT_ID)
++        elif batch_ptr is None:
+             # Update default value after class definition
+             batch_ptr = torch.full(
+                 (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
+diff --git a/vllm/v1/worker/gpu/model_states/mamba_hybrid.py b/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+index 94c57c1968..fbdce7af42 100644
+--- a/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
++++ b/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+@@ -42,6 +42,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
+     is_prefilling: torch.Tensor
+     num_accepted_tokens: torch.Tensor | None = None
+     num_decode_draft_tokens_cpu: torch.Tensor | None = None
++    cudagraph_mode: CUDAGraphMode | None = None
+ 
+     def get_extra_common_attn_kwargs(
+         self, kv_cache_group_id: int, num_reqs: int
+@@ -61,7 +62,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
+             ),
+         ):
+             return {}
+-        return {
++        kwargs = {
+             "num_accepted_tokens": None
+             if self.num_accepted_tokens is None
+             else self.num_accepted_tokens[:num_reqs],
+@@ -69,6 +70,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
+             if self.num_decode_draft_tokens_cpu is None
+             else self.num_decode_draft_tokens_cpu[:num_reqs],
+         }
++        if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
++            kwargs["cudagraph_mode"] = self.cudagraph_mode
++        return kwargs
+ 
+ 
+ class MambaHybridModelState(DefaultModelState):
+@@ -321,6 +325,7 @@ class MambaHybridModelState(DefaultModelState):
+             is_prefilling=is_prefilling,
+             num_accepted_tokens=num_accepted_tokens,
+             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
++            cudagraph_mode=cudagraph_mode,
+         )
+         attn_metadata = build_attn_metadata(
+             attn_groups=attn_groups,

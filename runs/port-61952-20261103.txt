@@ -1,0 +1,70 @@
+# vllm#61952 port (kimseunghyun-kr): GDN core in breakable CUDA graphs of
+# mixed batches — TRIED AND REVERTED on 2026-11-03 (late)
+#
+# Ask: "ну давай kimseunghyun-kr потестим" — test the prime mixed-batch PR
+# candidate from the 11-03 upstream watch, on our prod profile (the TRUE-MISS
+# neighbor storm: agent A decodes while agent B cold-reads ~25k tokens).
+
+## What was ported
+- Upstream PR #61952 (includes #61779): static mixed-batch metadata + grids,
+  branch-free _forward_core_static (spec decodes -> conv -> peeled decodes ->
+  prefills -> merge), capture into breakable PIECEWISE graphs via
+  eager_break_during_capture(capturable=...), FLA ops use_graph fixed grids,
+  causal_conv1d_fn num_programs, run_uncaptured() Triton warm-up.
+- Method: 3-way apply onto the fork prod base (dflash2-pool @ f40a6d016d,
+  which is v0.31.0 + our patches). 7 conflicts resolved by hand. Upstream
+  flashinfer prefill / checkpoint-planner drift DROPPED (absent from our
+  base; our prod uses the triton/FLA GDN prefill backend). Our fork's
+  causal_conv1d align params kept, num_programs merged in. Full diff:
+  patches/port-gdn-61952.diff (12 files, fork branch port-gdn-61952,
+  commit 9784cee7bc).
+- Deploy: 12 per-file bind mounts + boot log line [gdn-mixed-capture].
+
+## Gates (all green on first boot)
+- We run the V2 Model Runner (required at PP3 + async scheduling; the flag's
+  False default in compilation.py is a parameter default, not the runtime
+  value — boot log says "Using V2 Model Runner").
+- [gdn-mixed-capture] static GDN core: True on all 3 PP ranks
+  (breakable=True piecewise=True v2_runner=True cuda=True backend=triton
+  prefill_ckpt_blocks=0 — the base GDN get_kv_cache_spec never sets prefill
+  checkpoint blocks, so our prefix-replay-depth machinery does not conflict).
+- THE ACTIVATION KEY: mixed-batch graph descriptors are built from the SAME
+  cudagraph_capture_sizes list (ours ended at 80 tokens). Added 944
+  (= 864 FN12 chunk + up to 80 decode tokens) -> a 14th breakable PIECEWISE
+  graph; pool 5,213,062 / 4.97x (-1.2%).
+- Engagement PROVEN: temporary [cg-diag] log in the model runner dispatch —
+  steps num_toks=112/864/869 -> mode=PIECEWISE desc_tokens=944 on all ranks.
+  The static core is inside the replayed graph; this is not a silent no-op.
+
+## A/B (2-3 probe runs per side, same day; probes on the CT)
+metric                          base            port + 944-graph
+solo RU decode (t/s)            137.1 / 137.2   122.4 / 124.5 / 129.8   -6..-11%
+TRUE-MISS storm, A overall      50.6            49.2 / 49.3             parity
+TRUE-MISS storm, A in-chunk     4.2             3.9 / 4.1               parity
+HIT storm, A overall            117.3           117.2                   parity
+HIT storm, A during-B           23.6            26.0 / 27.5             +10-16% (in-window only)
+PAIR (2 decoders)               122.1-130.1     118.3-127.7             parity
+cold 13.4k prefill (k tok/s)    3.99 / 4.15     3.95 / 4.04             -0..-5%
+B send walls (s)                3.9-4.2         3.9-4.2                 identical
+prefix replay depth             4/4 at 100%     4/4 at 100%             unchanged
+pool (tokens / concurrency)     5,282,636 / 5.04x  5,213,062 / 4.97x    -1.2%
+
+Note: the morning TRUE-MISS reading of 58.7 was NOT reproducible; the same-day
+band is 49-51 on both variants. Do not compare against single morning runs.
+
+## Verdict
+The mechanism works on our stack (gates open, graph captured, mixed steps
+dispatch into it) and changes nothing where it hurts: our mixed steps are
+GPU-BOUND (864 tokens x layers + int8 hops fill the step by themselves), so
+removing host-side overhead has nothing to remove — the author's 99->55 ms
+mixed-step host time came from small host-bound agentic sends on A100. The
+port's only clear effects here are negative: a per-step staging tax on every
+build() (solo -6..-11%) and 1.2% of pool for the 944 graph. REVERTED.
+
+Rollback verified: fork back to dflash2-pool @ f40a6d016d, 12 binds removed,
+944 removed from the yml; gates re-run green (depth 4/4 at 100%, solo 137.1,
+pool 5,282,636 / 5.04x). Branch port-gdn-61952 kept on the fork.
+
+Revisit triggers: upstream merges the series AND our profile turns host-bound
+(many small agent sends, small chunks), or a smaller-chunk config where mixed
+steps approach the capture sizes anyway.

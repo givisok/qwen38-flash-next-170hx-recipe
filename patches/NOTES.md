@@ -581,3 +581,23 @@ unchanged (greedy x2 non-identity is the older int8-hop trait, recorded
 probes: scripts/prefix_probe.py, scripts/depth_diag_probe.py,
 scripts/greedy_gate3.py. Env-gated [rekey-diag] added under
 VLLM_CACHE_DIAG=1.
+
+## port-gdn-61952.diff (2026-11-03 late) — TRIED AND REVERTED, kept on the fork branch
+
+Port of upstream vllm#61952 (+ its part 1 #61779, kimseunghyun-kr): the GDN
+core captured INTO breakable PIECEWISE CUDA graphs of mixed prefill+decode
+steps (branch-free _forward_core_static, persistent capture buffers in the
+metadata builder, FLA ops use_graph fixed grids, causal_conv1d_fn
+num_programs). Applied 3-way onto the prod base; upstream flashinfer-prefill
+drift dropped (not in our base). Gates all opened (we are on the V2 model
+runner; the base GDN spec sets no prefill checkpoint blocks). Engagement
+key: mixed-batch descriptors come from the same cudagraph_capture_sizes
+list, so a 944 entry (= 864 chunk + decode riders) was required — [cg-diag]
+proved steps 864/869 dispatching into the 944 graph on all PP ranks.
+
+Outcome on our stack: storm parity (mixed steps are GPU-bound — 864 tokens
+x layers + int8 hops fill the step; the author's win was host-bound small
+sends on A100), solo decode -6..-11% (per-step staging tax), pool -1.2%.
+Reverted same day; prod re-verified green. The diff is kept here for the
+day the profile turns host-bound or the series merges upstream with more.
+Full data: runs/port-61952-20261103.txt.
