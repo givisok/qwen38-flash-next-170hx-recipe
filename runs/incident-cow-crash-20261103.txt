@@ -1,0 +1,72 @@
+# Incident 2026-11-03 18:22 UTC: engine killed by a partial-hit CoW assert
+# in the prefix-replay-depth patch — root cause, full fix, verification
+
+## Timeline (log times UTC; local = UTC+3)
+- 12:24  container (re)created during the #61952 rollback reboot — prod baseline
+- 18:22:12  replay traffic: pi-agent requests (prompts 37.4k -> 39.7k tokens,
+         prefix hit 97%, partial hit inside block 21 at the hash-16 boundary)
+- 18:22:15  EngineCore fatal: single_type_kv_cache_manager.py:1961
+         allocate_new_blocks -> assert req_blocks[block_idx] is source_block
+         -> EngineDeadError -> clean shutdown, container exit
+- 18:22:21  restart policy (unless-stopped) brought the container back;
+         boot clean, /health 200, but the whole prefix cache was lost (cold)
+- 19:0x    fix developed, committed, container recreated (see below)
+
+## Root cause
+The crash is in OUR extension on top of the ported vllm#52244 mechanics, not
+in upstream #52244 (upstream publishes the replay-landing state directly and
+has no such assert; the producer-side CoW redirect is fork-only code).
+
+The producer path (_cache_partial_tail_block) publishes a fine-grained
+landing state for a RUNNING request and records (block_idx, source_block) +
+a producer tail. The consumer path (allocate_new_blocks) assumed the
+request's block table is strictly append-only between the two steps and
+enforced it with a bare assert. Under replay traffic with active hash
+evictions (log shows [hash-rm] runs inside the very get_new_blocks call
+before the assert), the identity broke once in ~6 h of production: the
+record went stale and the assert killed the engine instead of degrading.
+
+First and only occurrence in that run (RestartCount=1; zero errors in the
+preceding 6 h). Not OOM (OOMKilled=false), not the reverted #61952 port
+(those files were never active in this container).
+
+## Fix (fork commit 1000662c31 on dflash2-pool)
+- Consume the partial-hit record defensively: validate BOTH identities
+  (req_blocks[block_idx] and the producer marker) BEFORE any mutation.
+  On mismatch: retract the unproven published hash via
+  block_pool._maybe_evict_cached_block (the same tool the checkpoint branch
+  uses for non-reusable states), keep the reserved cow_block as a plain new
+  block of the request (plain over-allocation — an expected state per the
+  surrounding code), and log a warning with all block ids. Worst case one
+  landing state goes unpublished and the next replay of that prefix hits
+  one hash unit shallower. Never fatal. Full diff:
+  patches/prefix-replay-cow-fix.diff
+- Removed the permanent cache-diag scaffolding ([hit-diag], [cache-diag],
+  [rekey-diag], [mamba-lookup], [hash-ins], [hash-rm]) from
+  single_type_kv_cache_manager.py, kv_cache_coordinator.py, block_pool.py.
+  Its env gate checked truthiness, so VLLM_CACHE_DIAG=0 from the launcher
+  kept it always on: per-step scheduler work + log spam that buried real
+  errors. The launcher env line was removed too.
+
+## Deploy + verification (same evening)
+- py_compile + import smoke in a throwaway container (3 files over
+  dist-packages): green.
+- Container recreated from /root/qwen38fn (binds pin inodes): boot clean,
+  zero tracebacks, zero diag lines, "Using V2 Model Runner", /health 200.
+- Replay-depth gate (depth_diag_probe, 8231-token prompt):
+  cold 0 -> 8208 / 8231 = 99.7% (full landing depth, one hash unit below
+  the prompt end — the #52244 ceiling). Machinery intact.
+- Solo RU decode: 132.1 / 137.4 / 131.4 tok/s vs the 137.1-137.2 baseline
+  pair — parity within single-stream probe noise.
+- Engine log after probes: 0 errors, 0 [partial-cow] warnings (the defensive
+  path is silent in normal traffic; if it ever fires, the warning carries
+  request id + both block ids — the exact data to pin the remaining
+  interleaving).
+
+## Follow-ups
+- If a [partial-cow] warning appears in logs, capture it: it names the
+  stale record's block ids and will identify which non-append-only
+  operation rewrote the table (suspects: speculative-block relocation,
+  second publication, checkpoint rekey).
+- Prod state unchanged config-wise (MTP-4 @ 0.95, chunk 864); new prod tag:
+  prod-mtp4-20261103-2 (code fix only).

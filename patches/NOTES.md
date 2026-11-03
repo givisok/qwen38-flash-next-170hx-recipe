@@ -601,3 +601,12 @@ sends on A100), solo decode -6..-11% (per-step staging tax), pool -1.2%.
 Reverted same day; prod re-verified green. The diff is kept here for the
 day the profile turns host-bound or the series merges upstream with more.
 Full data: runs/port-61952-20261103.txt.
+
+## prefix-replay-cow-fix.diff (2026-11-03 night, fork 1000662c31)
+Same-day fix for the first engine crash caused by the replay-depth patch:
+the producer-side partial-hit CoW asserted an append-only block table and
+killed the engine once under replay traffic (18:22 UTC, log in
+runs/incident-cow-crash-20261103.txt). Now consumed defensively — identities
+checked before mutation, unproven hash retracted, never fatal; the always-on
+cache-diag logging is gone. Apply on top of prefix-replay-depth.diff if that
+patch is ever re-based.
