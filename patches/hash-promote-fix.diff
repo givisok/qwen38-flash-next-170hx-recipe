@@ -1,0 +1,80 @@
+commit e0d4fc6eb7c98d7f1dd5b3b9c765edb19397e682
+Author: givis <givis@local>
+Date:   Wed Nov 4 15:24:26 2026 +0000
+
+    prefix-replay-depth: hash promotion must tolerate aligned publications
+    
+    Second engine-killing assert in the partial-hash machinery (11-04 14:58
+    UTC, ~20 h after the CoW fix, [partial-cow] never fired — an independent
+    path): cache_full_blocks asserted a pre-hashed new full block always
+    carries a PARTIAL publication (block_hash_num_tokens < num_hash_tokens).
+    An aligned landing/checkpoint publication instead registers the chain
+    hash AT the full token count; when such a block re-entered the caching
+    window the strict < killed the engine.
+    
+    Promotion now handles three cases: equal count + same hash = no-op (the
+    entry under this key is already the one we would insert); strict partial
+    = the original remove-and-reinsert promotion; anything else (None /
+    stale) = warn with block id and counts, retract, re-register. Cache
+    bookkeeping degrades, never kills.
+    
+    Sibling hardening: the boundary-offload loop asserted
+    block.block_hash_num_tokens is not None before offering a boundary to
+    the connector; a hash without a count now skips the offer instead of
+    dying.
+
+diff --git a/vllm/v1/core/block_pool.py b/vllm/v1/core/block_pool.py
+index ebc8ff3018..741e62c13d 100644
+--- a/vllm/v1/core/block_pool.py
++++ b/vllm/v1/core/block_pool.py
+@@ -284,12 +284,30 @@ class BlockPool:
+                 block_hash, kv_cache_group_id
+             )
+             if blk.block_hash is not None:
+-                # The only valid case where a "new full block" already has a
+-                # hash is partial->full promotion of the same cache block.
+-                assert (
++                # Expected case: partial->full promotion — the block carries
++                # a partial publication with a token count strictly below
++                # the full hash's. An aligned landing/checkpoint publication
++                # instead registers the chain hash AT the full token count;
++                # that entry is exactly the one this pass would insert, so
++                # promotion is a no-op (crash observed once in ~20 h when
++                # such a block re-entered the caching window). Anything else
++                # is stale metadata: retract and re-register, never fatal.
++                if (
++                    blk.block_hash_num_tokens == num_hash_tokens
++                    and blk.block_hash == block_hash_with_group_id
++                ):
++                    continue
++                if not (
+                     blk.block_hash_num_tokens is not None
+                     and blk.block_hash_num_tokens < num_hash_tokens
+-                )
++                ):
++                    logger.warning(
++                        "[hash-promote] unexpected metadata blk=%s "
++                        "num_tokens=%s full_tokens=%s — re-registering",
++                        blk.block_id,
++                        blk.block_hash_num_tokens,
++                        num_hash_tokens,
++                    )
+                 removed_hashes = self._remove_cached_block_hashes(blk)
+                 self._emit_block_removed_events(removed_hashes)
+             self._insert_block_hash(
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index 23bf33a284..ecf70e0db0 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -2085,7 +2085,10 @@ class MambaManager(SingleTypeKVCacheManager):
+                     continue
+                 self.cached_blocks_this_step.add(block.block_hash)
+                 if self.mamba_cache_mode == "align":
+-                    assert block.block_hash_num_tokens is not None
++                    if block.block_hash_num_tokens is None:
++                        # A hash without a token count carries no boundary
++                        # position to offer; skip the offload, keep caching.
++                        continue
+                     # Offer every retained boundary with its exact block.
+                     # The connector filters against its save window, which may
+                     # extend past the original prompt during resumed prefill.

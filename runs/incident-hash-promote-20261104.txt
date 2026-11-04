@@ -1,0 +1,71 @@
+# Incident 2026-11-04 14:58 UTC: second engine-killing assert in the
+# partial-hash machinery (hash promotion) — fixed same hour
+#
+# Ask: "Опять упал разбирайся" (second crash in two days of the
+# prefix-replay-depth patch family).
+
+## What happened
+- 11-03 ~19:00 UTC: CoW crash fix deployed (fork 1000662c31, prod tag
+  prod-mtp4-20261103-2). Clean run afterwards: 20 hours, zero errors,
+  zero [partial-cow] warnings — yesterday's defensive path never fired.
+- 11-04 14:58:25 UTC: EngineCore fatal in a DIFFERENT spot, same patch
+  family:
+    scheduler.update_from_output -> cache_blocks -> cache_full_blocks
+    (block_pool.py:290)
+        assert (blk.block_hash_num_tokens is not None
+                and blk.block_hash_num_tokens < num_hash_tokens)
+  Traffic at the moment: single running request, prefix hit 93.6%
+  (pi replays again). Auto-restart revived the container in 1 s; prefix
+  cache lost.
+
+## Root cause
+cache_full_blocks' promotion branch assumes the ONLY way a "new full
+block" can already carry a hash is a PARTIAL publication (token count
+strictly below the full hash's). But an ALIGNED landing/checkpoint
+publication (block-multiple boundary — e.g. a retained PLE checkpoint at
+17280 = 10*1728, or a prompt landing exactly on a block edge) registers
+the chain hash AT the full token count via cache_partial_block, which
+does not guard num_tokens % block_size. When such a block later
+re-entered the caching window (partial-hit cap re-bases
+num_cached_blocks downward, resumed prefill, etc.), the strict `<`
+failed and killed the engine.
+
+Rare by intersection: needs an aligned publication AND the block
+re-entering a caching pass — one hit in ~20 h of production.
+
+Independent of yesterday's crash: [partial-cow] never fired; different
+code path (end-of-step caching pass, not allocation).
+
+## Fix (fork e0d4fc6eb7 on dflash2-pool, deployed 11-04 ~15:24 UTC)
+Promotion now handles three cases instead of asserting one:
+1. count == full count AND same hash value -> no-op: the entry under
+   this key is already exactly the one this pass would insert (aligned
+   landing/checkpoint publication; deterministic chain hash).
+2. count strictly below full -> the original remove-and-reinsert
+   promotion (true partial -> full).
+3. anything else (None / stale) -> logger.warning "[hash-promote]" with
+   block id and both counts, retract, re-register. Self-healing; the
+   warning doubles as a tripwire.
+Sibling hardening in the same family: the boundary-offload loop in
+single_type_kv_cache_manager asserted block.block_hash_num_tokens is not
+None before offering the boundary to the PLE connector; a hash without a
+count now skips the offer (cache_blocks_this_step bookkeeping intact).
+Full diff: patches/hash-promote-fix.diff
+
+## Verification
+- py_compile + import smoke in a throwaway container: green.
+- Container recreated; boot clean, zero tracebacks, health 200.
+- Replay-depth gate: cold 0 -> 8208/8231 (full landing ceiling).
+- Solo RU decode: 146.1 tok/s (quiet hour; baseline band 131-137 —
+  parity-plus, no regression from the extra bookkeeping).
+
+## Pattern note (two crashes, one lesson)
+Both crashes were bare asserts guarding CACHE BOOKKEEPING invariants of
+the fine-grained partial-hash machinery. Rule now enforced across the
+family: a cache-publication optimization must degrade (retract one
+entry, hit one unit shallower, skip one offer) and log, never kill the
+engine. Remaining bare asserts in the family were audited: move_block_hashes
+(dst is freshly allocated + reset), set_block_hash (guarded by the
+insert branch), cache_partial_block (static config) — structurally safe.
+Tripwires to watch in logs: [partial-cow] (11-03 fix), [hash-promote]
+(this fix).

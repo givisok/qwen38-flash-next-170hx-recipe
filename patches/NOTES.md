@@ -610,3 +610,13 @@ runs/incident-cow-crash-20261103.txt). Now consumed defensively — identities
 checked before mutation, unproven hash retracted, never fatal; the always-on
 cache-diag logging is gone. Apply on top of prefix-replay-depth.diff if that
 patch is ever re-based.
+
+## hash-promote-fix.diff (2026-11-04, fork e0d4fc6eb7)
+Second crash of the partial-hash machinery, independent path from the
+11-03 CoW fix ([partial-cow] never fired): the promotion assert in
+cache_full_blocks rejected blocks whose hash was published at an ALIGNED
+(block-multiple) boundary — count equal to the full hash's, not strictly
+less. Promotion is now a three-case tolerant path (no-op / promote /
+warn-and-re-register), and the boundary-offload loop skips hashes without
+a token count. Apply on top of prefix-replay-depth.diff +
+prefix-replay-cow-fix.diff.
