@@ -1,0 +1,60 @@
+# Reproduction + full audit of the two 2026-11-03/04 engine crashes
+# (follow-up to "Опять упал разбирайся" — prove the how and the why, don't
+# just patch blind). Fork test commit 83df5817f8; copy of the test file:
+# tests/test_cow_promotion_guards.py (drop into the fork tree at
+# tests/v1/core/prefix_cache/ to run).
+
+## Method
+Upstream's prefix-cache unit-test stand (tiny fake KV specs, hash unit 2,
+mamba block 4, CPU-only — the same stand vllm#52244 ships its tests on).
+Four tests run against both trees in a throwaway container:
+- OLD = f40a6d016d (pre both fixes — the code that ran in prod both days)
+- NEW = e0d4fc6eb7 (both fixes)
+
+## Results
+OLD: 2 failed at the EXACT production crash lines, 2 passed
+  - test_producer_stale_record_degrades -> AssertionError at
+    single_type_kv_cache_manager.py:1961  (== the 11-03 18:22 UTC crash)
+  - test_promotion_aligned_publication_is_noop -> AssertionError in
+    cache_full_blocks' promotion branch  (== the 11-04 14:58 UTC crash)
+  - true-partial promotion and the consumer happy path PASS on old code —
+    exactly why prod ran ~20 h fine between incidents.
+NEW: 4 passed.
+
+## The how and the why, now proven
+Crash 1 (11-03, CoW identity): the producer-side landing record
+(block_idx, source_block) is created at the END-of-step caching pass and
+consumed at the NEXT step's allocation — it lives ACROSS steps. Only two
+operations ever rewrite a request's block table mid-table (_apply_cow at
+consumption, speculative-block relocation), and any such rewrite between
+publication and consumption breaks the "append-only" assumption the bare
+assert enforced. The test simulates the rewrite directly; the fix degrades
+(retract + warn with block ids) on ANY rewrite — the [partial-cow]
+warning will name the culprit blocks if it ever fires naturally.
+
+Crash 2 (11-04, promotion): an ALIGNED (block-multiple) landing/checkpoint
+publication registers the chain hash AT the full token count
+(cache_partial_block does not guard num_tokens % block_size; the
+`key_tokens % block_size` guard in the publication path only skips the
+CONSUMER record, not the hash registration). The promotion pass then saw
+"new full block already hashed" with count == full and demanded strictly
+less. The consumer happy-path test documents the punchline: the ORDINARY
+flow (every block-aligned prompt end) routinely produces such aligned
+publications — the bomb is planted constantly; only the rare re-entry of
+that block into a later promotion window (partial-hit cap re-bases
+num_cached_blocks, resumed prefill) detonates it. Hence 1 hit in ~20 h.
+
+## Remaining-risk audit (the rest of the assert family)
+- _apply_cow's identity asserts (473-475): structurally SAFE — the
+  consumer record is created and consumed inside a SINGLE allocate_slots
+  call (blocks are attached lazily at allocation, not at lookup), and
+  nothing between the two can rewrite the table single-threaded. Proven
+  by the debug flow (lookup leaves no req_blocks entry; allocation
+  creates+consumes atomically).
+- move_block_hashes dst asserts: dst is freshly allocated + reset.
+- set_block_hash: guarded by the insert branch.
+- cache_partial_block / config asserts: static.
+- get_new_blocks ref asserts: pool discipline (would indicate a different
+  bug class; left strict deliberately).
+Verdict: no further reachable engine-killers of this family remain; the
+two tripwires ([partial-cow], [hash-promote]) stay as sentinels.
