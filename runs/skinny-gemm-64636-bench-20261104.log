@@ -1,0 +1,75 @@
+device: NVIDIA CMP 170HX (8, 0)
+
+===== PHASE A: replicated shapes, PR configs =====
+A (512,2560) M=1 bs=160 ob=2 ku=2 vw=8 sk=True | base   30.72/  66.56us skinny   40.45/  76.80us | x0.76/x0.87 cos 1.00000 drop
+A (512,2560) M=2 bs=160 ob=1 ku=1 vw=8 sk=True | base   34.06/  61.44us skinny   36.09/  65.54us | x0.94/x0.94 cos 1.00000 drop
+A (512,2560) M=4 bs=160 ob=2 ku=4 vw=8 sk=True | base   34.83/  62.46us skinny   35.64/  66.56us | x0.98/x0.94 cos 1.00000 drop
+A (512,2560) M=8 bs=64 ob=1 ku=4 vw=8 sk=True | base   33.06/  62.46us skinny   37.11/  81.92us | x0.89/x0.76 cos 1.00000 drop
+A (1,2560) M=1 bs=160 ob=1 ku=2 vw=8 sk=True | base   33.07/  58.37us skinny   37.03/  81.92us | x0.89/x0.71 cos 1.00000 drop
+A (1,2560) M=2 bs=160 ob=1 ku=2 vw=8 sk=True | base   30.49/  58.37us skinny   36.51/  65.54us | x0.84/x0.89 cos 1.00000 drop
+A (1,2560) M=4 bs=160 ob=1 ku=4 vw=4 sk=True | base   28.26/  55.30us skinny   30.36/  61.44us | x0.93/x0.90 cos 1.00000 drop
+A (1,2560) M=8 bs=128 ob=1 ku=4 vw=4 sk=True | base   26.96/  54.27us skinny   31.68/  61.44us | x0.85/x0.88 cos 1.00000 drop
+A (1,2560) M=16 bs=128 ob=1 ku=4 vw=4 sk=True | base   28.27/  53.25us skinny   31.40/  61.44us | x0.90/x0.87 cos 1.00000 drop
+A (320,10240) M=1 bs=256 ob=1 ku=4 vw=8 sk=True | base   29.06/  55.30us skinny   32.61/  61.44us | x0.89/x0.90 cos 1.00000 drop
+A (320,10240) M=2 bs=160 ob=4 ku=4 vw=8 sk=False | base   30.12/  59.39us skinny   31.47/  62.46us | x0.96/x0.95 cos 1.00000 drop
+A (10240,320) M=1 bs=32 ob=4 ku=4 vw=2 sk=True | base   29.02/  55.30us skinny   35.86/  62.46us | x0.81/x0.89 cos 1.00000 drop
+A (10240,320) M=2 bs=32 ob=4 ku=4 vw=2 sk=True | base   27.69/  56.32us skinny   34.08/  66.56us | x0.81/x0.85 cos 1.00000 drop
+A (10240,320) M=4 bs=32 ob=4 ku=4 vw=2 sk=True | base   25.40/  54.27us skinny   31.11/  62.46us | x0.82/x0.87 cos 1.00000 drop
+
+===== PHASE B: TP1 shapes, search =====
+B gdn-qkvz (16384,2560) M=1 base_hot=63.74us
+B-gdn-qkvz (16384,2560) M=1 bs=160 ob=1 ku=2 vw=2 sk=True | base   64.03/ 106.50us skinny   52.16/ 107.52us | x1.23/x0.99 cos 1.00000 drop
+B-gdn-qkvz (16384,2560) M=1 bs=160 ob=1 ku=2 vw=4 sk=True | base   64.73/ 105.47us skinny   56.29/ 108.54us | x1.15/x0.97 cos 1.00000 drop
+B gdn-qkvz (16384,2560) M=5 base_hot=65.09us
+B-gdn-qkvz (16384,2560) M=5 bs=128 ob=2 ku=2 vw=4 sk=True | base   65.08/ 105.47us skinny   83.60/ 129.02us | x0.78/x0.82 cos 1.00000 drop
+B-gdn-qkvz (16384,2560) M=5 bs=128 ob=4 ku=2 vw=4 sk=True | base   65.01/ 105.47us skinny   77.89/ 125.95us | x0.83/x0.84 cos 1.00000 drop
+B gdn-qkvz (16384,2560) M=10 base_hot=64.95us
+B-gdn-qkvz (16384,2560) M=10 bs=128 ob=4 ku=4 vw=4 sk=True | base   65.08/ 106.50us skinny  141.22/ 187.39us | x0.46/x0.57 cos 1.00000 drop
+B-gdn-qkvz (16384,2560) M=10 bs=128 ob=4 ku=2 vw=4 sk=True | base   65.20/ 106.50us skinny  141.18/ 188.42us | x0.46/x0.57 cos 1.00000 drop
+B qsa-qkv-gate (21504,2560) M=1 base_hot=87.83us
+B-qsa-qkv-gate (21504,2560) M=1 bs=160 ob=1 ku=4 vw=2 sk=True | base   81.36/ 128.00us skinny   68.12/ 124.93us | x1.19/x1.02 cos 1.00000 drop
+B-qsa-qkv-gate (21504,2560) M=1 bs=160 ob=1 ku=4 vw=4 sk=False | base   81.56/ 126.98us skinny   68.60/ 110.59us | x1.19/x1.15 cos 1.00000 KEEP
+B qsa-qkv-gate (21504,2560) M=5 base_hot=83.01us
+B-qsa-qkv-gate (21504,2560) M=5 bs=128 ob=4 ku=2 vw=2 sk=True | base   83.01/ 129.02us skinny   77.36/ 142.34us | x1.07/x0.91 cos 1.00000 drop
+B-qsa-qkv-gate (21504,2560) M=5 bs=128 ob=4 ku=2 vw=4 sk=True | base   84.02/ 128.00us skinny   84.40/ 137.22us | x1.00/x0.93 cos 1.00000 drop
+B qsa-qkv-gate (21504,2560) M=10 base_hot=84.71us
+B-qsa-qkv-gate (21504,2560) M=10 bs=128 ob=4 ku=4 vw=4 sk=True | base   87.67/ 128.00us skinny  154.90/ 195.58us | x0.57/x0.65 cos 1.00000 drop
+B-qsa-qkv-gate (21504,2560) M=10 bs=128 ob=4 ku=2 vw=4 sk=True | base   85.04/ 128.00us skinny  146.14/ 196.61us | x0.58/x0.65 cos 1.00000 drop
+B out-proj (2560,6144) M=1 base_hot=30.45us
+B-out-proj (2560,6144) M=1 bs=128 ob=1 ku=4 vw=4 sk=True | base   32.74/  71.68us skinny   31.50/  69.63us | x1.04/x1.03 cos 1.00000 drop
+B-out-proj (2560,6144) M=1 bs=128 ob=1 ku=4 vw=4 sk=False | base   32.68/  72.70us skinny   32.61/  68.61us | x1.00/x1.06 cos 1.00000 drop
+B out-proj (2560,6144) M=5 base_hot=34.69us
+B-out-proj (2560,6144) M=5 bs=128 ob=2 ku=4 vw=4 sk=True | base   34.92/  74.75us skinny   33.36/  77.82us | x1.05/x0.96 cos 1.00000 drop
+B-out-proj (2560,6144) M=5 bs=128 ob=4 ku=4 vw=4 sk=True | base   34.51/  73.73us skinny   31.29/  76.80us | x1.10/x0.96 cos 1.00000 drop
+B out-proj (2560,6144) M=10 base_hot=35.32us
+B-out-proj (2560,6144) M=10 bs=128 ob=2 ku=2 vw=4 sk=True | base   35.20/  73.73us skinny   53.82/  98.30us | x0.65/x0.75 cos 1.00000 drop
+B-out-proj (2560,6144) M=10 bs=128 ob=2 ku=4 vw=4 sk=True | base   35.37/  74.75us skinny   53.73/  98.30us | x0.66/x0.76 cos 1.00000 drop
+B shared-gateup (1280,2560) M=1 base_hot=24.93us
+B-shared-gateup (1280,2560) M=1 bs=160 ob=4 ku=4 vw=4 sk=False | base   24.20/  52.22us skinny   30.37/  61.44us | x0.80/x0.85 cos 1.00000 drop
+B-shared-gateup (1280,2560) M=1 bs=160 ob=4 ku=4 vw=4 sk=True | base   24.62/  52.22us skinny   33.38/  62.46us | x0.74/x0.84 cos 1.00000 drop
+B shared-gateup (1280,2560) M=5 base_hot=30.35us
+B-shared-gateup (1280,2560) M=5 bs=128 ob=2 ku=2 vw=4 sk=True | base   29.69/  58.37us skinny   31.81/  63.49us | x0.93/x0.92 cos 1.00000 drop
+B-shared-gateup (1280,2560) M=5 bs=160 ob=2 ku=2 vw=4 sk=True | base   31.94/  58.37us skinny   33.23/  63.49us | x0.96/x0.92 cos 1.00000 drop
+B shared-gateup (1280,2560) M=10 base_hot=28.45us
+B-shared-gateup (1280,2560) M=10 bs=128 ob=4 ku=4 vw=4 sk=True | base   28.01/  56.32us skinny   33.79/  65.54us | x0.83/x0.86 cos 1.00000 drop
+B-shared-gateup (1280,2560) M=10 bs=160 ob=2 ku=4 vw=4 sk=True | base   28.44/  57.34us skinny   33.02/  65.54us | x0.86/x0.88 cos 1.00000 drop
+B gdn-ba (96,2560) M=1 base_hot=24.58us
+B-gdn-ba (96,2560) M=1 bs=160 ob=4 ku=2 vw=4 sk=True | base   24.62/  51.20us skinny   32.57/  63.49us | x0.76/x0.81 cos 1.00000 drop
+B-gdn-ba (96,2560) M=1 bs=160 ob=4 ku=4 vw=4 sk=True | base   24.14/  53.25us skinny   32.81/  63.49us | x0.74/x0.84 cos 1.00000 drop
+B gdn-ba (96,2560) M=5 base_hot=30.68us
+B-gdn-ba (96,2560) M=5 bs=160 ob=4 ku=4 vw=4 sk=True | base   31.14/  59.39us skinny   32.04/  64.51us | x0.97/x0.92 cos 1.00000 drop
+B-gdn-ba (96,2560) M=5 bs=128 ob=2 ku=4 vw=4 sk=True | base   30.37/  59.39us skinny   33.82/  63.49us | x0.90/x0.94 cos 1.00000 drop
+B gdn-ba (96,2560) M=10 base_hot=29.56us
+B-gdn-ba (96,2560) M=10 bs=160 ob=1 ku=2 vw=4 sk=False | base   30.60/  57.34us skinny   32.03/  61.44us | x0.96/x0.93 cos 1.00000 drop
+B-gdn-ba (96,2560) M=10 bs=160 ob=1 ku=2 vw=4 sk=True | base   31.14/  58.37us skinny   32.99/  62.46us | x0.94/x0.93 cos 1.00000 drop
+B lm-head (248320,2560) M=1 base_hot=811.93us
+B-lm-head (248320,2560) M=1 bs=160 ob=4 ku=4 vw=4 sk=True | base  776.13/ 813.06us skinny  767.43/ 800.77us | x1.01/x1.02 cos 1.00000 drop
+B-lm-head (248320,2560) M=1 bs=160 ob=4 ku=2 vw=4 sk=True | base  770.54/ 813.06us skinny  763.84/ 798.72us | x1.01/x1.02 cos 1.00000 drop
+B lm-head (248320,2560) M=5 base_hot=789.83us
+B-lm-head (248320,2560) M=5 bs=160 ob=4 ku=4 vw=2 sk=True | base  795.99/ 841.73us skinny 1066.85/1065.98us | x0.75/x0.79 cos 1.00000 drop
+B-lm-head (248320,2560) M=5 bs=160 ob=4 ku=4 vw=4 sk=True | base  788.10/ 848.90us skinny 1035.42/1092.61us | x0.76/x0.78 cos 1.00000 drop
+B lm-head (248320,2560) M=10 base_hot=804.25us
+B-lm-head (248320,2560) M=10 bs=160 ob=4 ku=4 vw=4 sk=True | base  804.76/ 843.78us skinny 2070.70/2099.20us | x0.39/x0.40 cos 1.00000 drop
+B-lm-head (248320,2560) M=10 bs=160 ob=4 ku=4 vw=2 sk=True | base  806.41/ 843.78us skinny 2093.58/2138.11us | x0.39/x0.39 cos 1.00000 drop
+
+DONE

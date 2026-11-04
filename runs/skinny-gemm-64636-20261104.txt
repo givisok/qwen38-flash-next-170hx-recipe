@@ -1,0 +1,53 @@
+# vllm#64636 (SM80 skinny GEMM for Qwen4Exp decode linears): measured on
+# our CMP 170HX at TP=1 — NOT TAKEN (2026-11-04 evening)
+#
+# Ask: "давай замерим и все перепроверим если ок заберём". Measured, checked,
+# honestly loses on our topology. Port + bench kept for the future.
+
+## What was done
+- Ported the PR kernel part onto fork branch port-gemm-64636 (commit
+  3edb258eb6; test-file hunks skipped): elect_one->lane0 below SM90, SM80
+  plan table, capability routing. All three files compile; cutlass CuTe DSL
+  present in the image; card reports (8, 0) as expected.
+- Microbench on GPU 1 while prod idle (tests/bench_skinny_sm80.py, log:
+  runs/skinny-gemm-64636-bench-20261104.log). Methodology per the PR author:
+  hot-loop timing AND L2-flush timing (256MB scrub, median), numerics gate
+  cosine > 0.999 (all configs passed at 1.00000), retention rule >= 3%
+  faster in BOTH hot and flush.
+- Phase A: the PR's OWN A100 configs on the replicated shapes (router
+  512x2560, shared gate 1x2560, HC down 320x10240, HC up 10240x320):
+  ALL DROP on our card (x0.76 - x0.98).
+- Phase B: config search over our real TP=1 shapes (gdn-qkvz 16384x2560,
+  qsa-qkv-gate 21504x2560, out-proj 2560x6144, shared-gateup 1280x2560,
+  gdn-ba 96x2560, lm-head 248320x2560) x M in {1, 5, 10}:
+  exactly ONE marginal keep — qsa-qkv-gate M=1 x1.18 hot / x1.06 flush
+  (bs160 ob2 ku2 vw4 dynamic-K). Every M=5 and M=10 cell loses (down to
+  x0.39 on the LM head at M=10).
+
+## Why it loses here (and won on the author's setup)
+The PR's wins are at TP=8: the projections are sharded 8x narrower
+(N=2048-2688), so the skinny GEMM's K-split pays off against cuBLASLt
+split-K + splitKreduce. At our TP=1 the N dimension is 8x wider
+(16384-248320) — plenty of output parallelism, cuBLASLt needs no split-K
+and the skinny kernel's partials/reduction overhead just adds latency.
+Phase A dropping even on replicated shapes says our card's cuBLASLt
+baselines are also faster than the author's A100 relative to this kernel
+(different SM count/clocks/L2 of the cut GA100).
+The one M=1 keep is a token count we effectively never run: with MTP-4
+the target model executes verify steps at M = 5 x seqs (5 solo), and the
+draft forward is the MTP head's own linears, not these.
+
+## Verdict
+NOT taken into prod. No prod change, no new tag (prod stays at
+prod-mtp4-20261104). Fork switched back to dflash2-pool immediately after
+the bench (binds read the working tree). Branch port-gemm-64636 and the
+bench script stay for a future where the economics change (TP>1 topology,
+an M=1-heavy non-spec lane, or upstream merging the series with a TP=1
+plan table worth re-testing).
+
+## Sweep context (same evening)
+All other triggers cold: #61779/#61952/#64205/#63193/#64625 open, EXL3
+dead, #56295 dead, clee fork dormant. #64898 HyperConnection fuse is
+SM100-only, #64263 ROCm-only, #64611/#65691 = parked dflash lane,
+RecoverSSM series = watch. #64636 was the only candidate and it is now
+measured and closed.
