@@ -1,0 +1,81 @@
+# Peer assessment 2026-11-06: inordic/cmp170hx-vllm-qwen38-flash-next
+# ("Asgard build") — same model class, same GPU class, a whole ecosystem
+# behind it. What transfers to us and what does not. No prod change from
+# this assessment (the parser port is proposed separately).
+
+## What it is
+Swift 1.5 W4A16 (a different checkpoint than our leoncca uncensored) on
+2x CMP 170HX, PP2 24/24, 262K ctx, MTP-4 + n-gram lookup + int4 draft
+lm_head, BF16 KV. Night-by-night A/B culture, quality suite (BFCL/EvalPlus/
+LCB/long-ctx), everything measured. Active: last push 2026-11-05. Base:
+vLLM a5a30471 + iIIusi0n PLE-SSD + 2dameneko 56e1347. Their headline:
+8.2-8.4k tok/s prefill at 128K, ~200 tok/s code decode solo, 511 tok/s at
+16 users, BFCL 80.3.
+
+## The prefill gap, decomposed (theirs 7.8-8.4k tok/s vs our ~4.4k)
+- CLOCKS: CLOSED AS A CAUSE. Sampled our cards under a live 32K probe:
+  we hold 1455-1485 MHz (mode 1470), exactly the "default clocks" band
+  their box holds. Our VBIOS already allows 1695 max; power limit 250 W.
+  Their 300 W VBIOS flash buys nothing we lack for this comparison.
+- CHUNK: their max_num_batched_tokens=4096 vs our 864 (4.7x bigger steps;
+  MoE expert batching much fatter, ~2.6x per-card throughput edge). Our
+  11-03 campaign already measured 1728: prefill -12% but mixed-step decode
+  cost kept 864 for our pi/RU-analysis profile. Their optimum fits agent
+  coding reads; ours fits interleaved decode. Not a lever to copy blindly.
+- PP2 vs PP3: fewer stages, less ring latency. Structural.
+
+## Transferable to us (ranked)
+1. PARSER HARDENING (their patches 24-26) — WE HAVE THE BUG. Their finding:
+   quoted tool-call markup in model output becomes real calls. Ran their
+   canaries against OUR prod: "repeat this markup, no tools" FIRED a call
+   (calc offered); fenced example did NOT fire; bare <function=...> form
+   FIRED. 2 of 3 canaries phantom-fire on our qwen3_xml parser. Their fix
+   set: #24 = vllm#50986 (validate offered tool names), #25 = vllm#57553
+   (fenced markup stays text), #26 = require the <tool_call> wrapper (bare
+   <function= stays text). Both upstream PRs are OPEN. PORT PROPOSED —
+   reliability for pi (agent traffic quoting markup in analysis output).
+   Our targets live in vllm/tool_parsers/ (newer layout than their tree).
+2. QSA indexer compact grid (their #22 = vllm#65470, open) — dtype-
+   independent grid compaction for the QSA prefill kernel; their +2-3%
+   long prefill is COMBINED with #23 though. Our tree HAS the kernel
+   (_qsa_mqa_paged_prefill_kernel in the bound qsa_indexer.py). Candidate
+   for a later port+measure, or wait for upstream merge.
+3. n-gram lookup before MTP (their #04 = squashed port of open vllm#60615,
+   "ngram_lookup": true in the speculative config) — free drafts on
+   repetitive agent/code text; their DFlash2 lane lost to "MTP4 + n-gram".
+   Our workload: code acceptance already high, RU reasoning acceptance
+   ~20% (little repetition). Workload-dependent — A/B candidate, not a
+   blind take. Port needed (their base differs).
+4. DotH (night 6): MTP head retrained on own agent traffic, acceptance
+   3.44-3.52 -> 3.66-3.69, decode +2-8%. An idea for the shelf: retrain
+   the leoncca MTP head on pi traffic (must stay leoncca-derived per our
+   checkpoint rule). Real project, not a patch.
+5. Methodology gifts: their canary set (parser canaries, prefix-bleed
+   soak, dead-drafter check, full-pool churn) is worth folding into our
+   gate battery; the "clocks locked at 1440" A/B discipline.
+
+## Not transferable / closed with reasons
+- QSA sm_80 launch configs (their #23 = vllm#62344): gated "BF16 QSA cache
+  only; INT8 or FP8 keeps stock config" — we run fp8_e4m3 KV, it would
+  never engage. CLOSED for our lane until an fp8 config appears upstream.
+- K1 INT8-KV scale CoW: their bug lives in 2dameneko's int8_per_token_head
+  patch (_pth_caches scale tensors); our fp8_e4m3 path carries no per-block
+  scales, CoW copies the kv_caches tensors wholesale. NOT our bug class.
+  (Their note confirms the partial-hit CoW storm shape under MTP + fine
+  prefix matching — the same waters our crash-1 fix patrols.)
+- VBIOS 300 W flash: moot (clocks equal, see above); also 3x300 W through
+  our PLX/X99 rig is a hardware risk with no measured need.
+- INT8 KV (+71% pool): their lane; we already run fp8 KV with a 5.2M pool.
+- MTP-5, bounded mixed prefill, INT8 activations (1.29x on these cards),
+  Humming MoE asymmetric-weight refusal: their negative results corroborate
+  our own campaign verdicts.
+
+## Watch list additions
+- inordic/cmp170hx-vllm-qwen38-flash-next (active, production-grade peer)
+- 2dameneko/vllm-Qwen3.8-Flash-Next-2xCMP170HX (their base)
+- iIIusi0n/qwen3.8-flash-next-cmp170hx (PLE-SSD recipe)
+- vektorprime qwen38-flash-next-pp2, xris99 qwen3.8-flash-next-cmp170hx
+  (unlicensed — read-only reference)
+- upstream PRs: #60615 (ngram+MTP), #65470 (QSA compact grid), #62344
+  (QSA sm_80), #50986 + #57553 (parser fixes), #55601/#60210/#56734
+  (their backports; check overlap with our base)
