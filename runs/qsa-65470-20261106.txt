@@ -1,0 +1,49 @@
+# 2026-11-06 (late): vllm#65470 QSA indexer compact grid — measured on our
+# box, NOT TAKEN (peer's +2-3% does not transfer to our geometry).
+# Fork branch port-qsa-65470 @ a805ff86d2 kept for the future.
+
+## What was done
+- Their patch #22 (the vllm/ part of open vllm#65470) applied to our tree
+  CLEANLY (all 6 hunks, +56-line offset; qsa_indexer.py is already in the
+  launcher bind list). Compact row-tile grid + binary-search request
+  lookup; dtype-independent (unlike #62344 sm_80 configs which gate on a
+  BF16 cache); falls back to the stock grid when not smaller.
+- Idle-window bounces both ways, fresh 3-rep solo baseline first.
+
+## Numbers (medians; solo true-miss TTFT)
+- solo 2000 tok: base 739 ms -> port 720 ms (-2.6%, 3-rep baseline noise)
+- solo 8000 tok: 2169 -> 2169 (0.0%)
+- solo 32000 tok: 7217 -> 7133 (-1.2%, borderline)
+- 4-way RAGGED concurrent (2k/8k/16k/32k simultaneously, 3 rounds, total
+  wall): base 12,887 ms vs port 12,805 ms (-0.6%, inside round noise
+  12.6-13.9k)
+- generations coherent, 0 errors both bounces.
+
+## Why no win here (and +2-3% on the peer)
+Their gain rides 4096-token prefill chunks on PP2: many row tiles per
+request per step make the stock request-x-tiles grid waste CTAs. Our chunk
+is 864 on PP3: ~14 tiles per solo step (sparse grid either way — for a
+single request compact == stock and the kernel falls back), and the QSA
+indexer is a thin slice of our step. The ragged 4-user probe stresses
+admission/queueing more than the indexer grid.
+
+## Verdict
+Not taken. No regression measured, but no measurable gain either — an
+open-PR kernel diff in prod with zero return is pure rebase surface.
+Re-visit if we ever move to larger prefill chunks or upstream merges it
+(the base-jump rebase brings it free). Branch port-qsa-65470 kept.
+
+## Same evening: n-gram lookup (#60615) sized, not started
+Their #04 is a hand-adapted squash of open vllm#60615 ("ngram_lookup":
+true with method=mtp — when exactly ONE request runs, draft by copying
+tokens after the last n-gram match in context and SKIP the MTP decode
+steps; no match or >1 request -> MTP alone). Requires MRV2 — we ARE on
+the V2 runner. Our base is NEWER than theirs here: spec_decode/ngram/
+(the standalone method) and target_dependent_ar already exist, but the
+lookup-before-MTP combo does not (no ngram_lookup field). Their 778-line
+patch does not apply (their hunks target their tree). Port = re-derivation
+onto our mtp/speculator.py + model_runner.py + config — a focused
+half-session with a T1-style correctness gate and a solo-repetitive
+workload A/B (acceptance counters from /metrics). Value case: their edit
+decode 304 tok/s partly rides this; our pi solo sessions replay documents
+— plausible but unproven on RU-analysis traffic.
