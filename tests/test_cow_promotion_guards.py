@@ -159,14 +159,20 @@ def test_producer_stale_record_degrades():
     assert rec is not None, "completion must record the landing CoW"
     block_idx, source_block = rec
 
-    # Simulate the table having moved before the next allocation (whatever
-    # rewrote it in prod — e.g. a speculative-block relocation).
+    # Simulate a mid-table rewrite to a DIFFERENT block (the class of
+    # rewrite _apply_cow performs): content identity is broken, the record
+    # is stale and the unproven publication must be retracted.
     blocks = mamba.req_to_blocks[req.request_id]
-    blocks[block_idx] = mamba._null_block
+    other = mamba.block_pool.get_new_blocks(1)[0]
+    blocks[block_idx] = other
 
     manager.allocate_slots(req, 1, 15)  # next (decode) step
-    # survived; record consumed
-    assert mamba._partial_hit_reqs.get(req.request_id) is None
+    # survived; the STALE record is consumed (a NEW landing record on
+    # `other` is legitimate tail bookkeeping, not the stale one); the
+    # unproven publication is retracted
+    rec2 = mamba._partial_hit_reqs.get(req.request_id)
+    assert rec2 is None or rec2[1] is not source_block
+    assert source_block.block_hash is None
 
 
 def test_consumer_partial_hit_cow_happy_path():
@@ -199,3 +205,32 @@ def test_consumer_partial_hit_cow_happy_path():
     blocks = mamba.req_to_blocks[consumer.request_id]
     assert blocks[4] is rec[1]
     assert not blocks[4].is_null and blocks[4].ref_cnt >= 1
+
+
+def test_producer_slot_vacated_by_relocation_keeps_publication():
+    """Prod 2026-11-05 (40 events): _relocate_speculative_block moved the
+    published tail block to the table end and nulled its old slot. The
+    publication still describes the request's true history — it must be
+    KEPT (only the directed CoW shortcut is lost), not retracted."""
+    manager, mamba = _manager()
+    prompt = list(range(15))  # unaligned end: landing published at 14
+    req = make_request("p", prompt, H, sha256)
+    _complete(manager, req, 15)
+
+    rec = mamba._partial_hit_reqs.get(req.request_id)
+    assert rec is not None
+    block_idx, source_block = rec
+    assert source_block.block_hash is not None
+    # the end-of-step pass also left the tail marker naming this block
+    # (exactly the shape the 40 prod events printed)
+    mamba._producer_partial_tail_reqs[req.request_id] = (source_block, 15)
+
+    # Replay the exact relocation: block moves to the end, slot becomes null.
+    blocks = mamba.req_to_blocks[req.request_id]
+    blocks.append(blocks[block_idx])
+    blocks[block_idx] = mamba._null_block
+
+    manager.allocate_slots(req, 1, 15)  # next (decode) step
+    assert mamba._partial_hit_reqs.get(req.request_id) is None
+    # the landing state stays published for future replays
+    assert source_block.block_hash is not None

@@ -1,0 +1,76 @@
+# 2026-11-06: TWO takes shipped in one bounce — vllm#66064 GDN prefill
+# state fusion (kept) + the [partial-cow] vacated-slot upgrade.
+# Prod state before: dflash2-pool @ 83df5817f8, tag prod-mtp4-20261104.
+
+## Part 1: vllm#66064 port — TAKEN into prod (fork 31a577afb8)
+Upstream merged 11-06 09:07 UTC: replace the eager GDN prefill state
+gather/scatter with the shared Triton kernels (gather_initial_states /
+scatter_states). Our base has neither the FlashInfer prefill branch nor the
+warmup infra of the PR, so the port is the exact subset our model runs:
+the two eager sites in _forward_core + imports (14 insertions, 3 deletions;
+patches/gdn-prefill-fusion-66064.diff). The explicit
+.to(ssm_state.dtype) cast is KEPT: our scatter kernel is an older revision
+that does not convert dtypes (upstream's does; their mixed-dtype test case
+would fail on ours). The image already contains byte-identical kernels
+(verified by diff) and a byte-identical pre-port layer file, so a single
+launcher bind line was added (run-qwen38fn.sh:129) — the layer was NOT in
+the per-file bind list before (trap: binds are per-file, the image is the
+default source; the mamba/gdn directory was untouched by binds until now).
+
+Unit tests: the PR's kernel parity test could not run standalone before the
+bounce (GPU-visibility quirk of the throwaway); the engine itself is the
+gate instead: smoke generation coherent, 0 errors, 0 tracebacks across the
+full probe battery, decode path untouched by design (prefill-only branch).
+
+### Prefill A/B (true-miss TTFT, client-timed, median; idle engine)
+baseline (dflash2-pool @ 83df5817f8, 5 reps):
+  2000 tok: 786 ms  [736..810]
+  8000 tok: 2199 ms [2170..2381]
+ 32000 tok: 7216 ms [7206..7288]
+port (2f1f347f66 lineage, 5 + 7 reps):
+  2000 tok: 750 / 760 ms  -> -4.6% / -3.3%
+  8000 tok: 2181 / 2179 ms -> -0.8% / -0.9%
+ 32000 tok: 7186 / 7203 ms -> -0.4% / -0.2%
+Decode sanity (RU-reasoning 600-token greedy x3): 114-140 tok/s — the known
+content-dependent lane (acceptance ~20% on reasoning; the 146 solo gate was
+a different workload); no regression, path untouched.
+
+### Honest read
+The PR's 1.16-1.50x is PER GDN LAYER prefill chain on B300. End-to-end our
+prefill is MoE-dominated, and GDN state ops are a thin slice: physics
+predicts exactly the sub-1% we measure at 8k/32k (saves ~2-3 launches per
+layer per chunk). The consistent 2k win (~3-5%) is the host-overhead share
+being larger on short prefills. KEPT because: no regression at any length,
+a real if small short-prompt win, bit-parity semantics, and it aligns our
+tree with upstream ahead of the #55688-era base-jump rebase.
+
+## Part 2: [partial-cow] vacated-slot upgrade (fork 9794d18ed6 + 6646825df6)
+The 40 prod degradations of 11-05 were ALL this shape: slot = _null_block
+(block_id 0), marker intact — the signature of _relocate_speculative_block
+(exactly 4/request = MTP-4 spec slots), which APPENDS the block to the
+table tail and nulls the old slot. The publication still describes the
+request's true history (cached blocks are immutable while hashed), so the
+old behavior (evict the hash) threw away a valid landing state 40x/day.
+
+New consume logic (patches/partial-cow-vacated-slot.diff):
+- slot is source_block + marker ok -> happy CoW (unchanged)
+- NEW: slot is _null_block + marker ok -> KEEP the publication, INFO log
+  "publication kept"; only the directed CoW shortcut is lost; the generic
+  hit/CoW path re-attaches the prefix on the next lookup
+- anything else (real rewrite / marker mismatch / past-end) -> unchanged
+  warn + evict (the [partial-cow] WARNING is again a true anomaly signal)
+
+Tests (tests/test_cow_promotion_guards.py, fork copy updated): 5/5 green on
+the unit stand — the old stale test was retargeted to a REAL rewrite (it
+used to simulate the null-slot case, which is now the benign branch; it
+also exposed that a NEW landing record on the rewrite block is legitimate
+tail bookkeeping, assertion fixed), plus the new
+test_producer_slot_vacated_by_relocation_keeps_publication.
+
+## Ship
+One bounce 11-06 ~09:57 UTC (window: 0 running requests, GPUs 0%): launcher
+relaunch on the port branch, ready after 240 s, smoke ok, probes, then the
+branch was folded into dflash2-pool by cherry-pick (the ff-merge diverged
+on the duplicated test-fix commit) -> dflash2-pool @ 31a577afb8 = prod.
+Engine kept running throughout the branch bookkeeping (identical tree, the
+binds read the same bytes).

@@ -1,0 +1,69 @@
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index ecf70e0db0..101312f6b4 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -1926,13 +1926,22 @@ class MambaManager(SingleTypeKVCacheManager):
+                         request_id, None
+                     )
+                     cow_block = new_blocks[0]
++                    slot = (
++                        req_blocks[block_idx]
++                        if block_idx < len(req_blocks)
++                        else None
++                    )
++                    marker_ok = (
++                        producer_tail is not None
++                        and producer_tail[0] is source_block
++                    )
+                     if blocks_allocated and not (
+-                        req_blocks[block_idx] is source_block
++                        slot is source_block
+                         and (
+                             producer_tail is None
+-                            or producer_tail[0] is source_block
++                            or marker_ok
+                         )
+-                    ):
++                    ) and not (slot is self._null_block and marker_ok):
+                         # The record went stale between the tail publication
+                         # and this allocation: the request's block table moved
+                         # under an operation that is not strictly append-only
+@@ -1949,8 +1958,8 @@ class MambaManager(SingleTypeKVCacheManager):
+                             block_idx,
+                             source_block.block_id,
+                             (
+-                                req_blocks[block_idx].block_id
+-                                if block_idx < len(req_blocks)
++                                slot.block_id
++                                if slot is not None
+                                 else f"<past end ({len(req_blocks)})>"
+                             ),
+                             (
+@@ -1961,6 +1970,27 @@ class MambaManager(SingleTypeKVCacheManager):
+                         )
+                         self.block_pool._maybe_evict_cached_block(source_block)
+                         # cow_block stays a plain new block of this request.
++                    elif blocks_allocated and (
++                        slot is self._null_block and marker_ok
++                    ):
++                        # Vacated slot: _relocate_speculative_block moved the
++                        # block to the table tail (it stays alive and owned by
++                        # this request) or the slot was null-filled for
++                        # skipped tokens. The published hash still describes
++                        # the request's true history, and cached blocks are
++                        # immutable while hashed, so KEEP the entry: future
++                        # replays hit it, and this request re-attaches through
++                        # the generic hit/CoW path on its next lookup. Only
++                        # the directed CoW shortcut is lost. Never fatal.
++                        logger.info(
++                            "[partial-cow] producer slot vacated by spec "
++                            "relocation req=%s idx=%d block=%s"
++                            " - publication kept",
++                            request_id,
++                            block_idx,
++                            source_block.block_id,
++                        )
++                        # cow_block stays a plain new block of this request.
+                     elif blocks_allocated:
+                         # The worker block table of a running request is
+                         # append-only, so the request must stay on
