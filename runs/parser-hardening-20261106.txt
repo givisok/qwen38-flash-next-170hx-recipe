@@ -1,0 +1,58 @@
+# 2026-11-06 (evening): parser hardening shipped — phantom tool calls dead
+# Fork dflash2-pool @ 3d55bcefc3 (on top of 31a577afb8); launcher +3 parser
+# binds; tag prod-mtp4-20261106-2. Origin: the inordic Asgard peer's
+# parser-fix patches 24-26 (see runs/peer-inordic-assessment-20261106.txt).
+
+## The bug, proven on OUR prod before any change
+Their canaries against our endpoint (qwen3_xml parser, thinking off):
+- "repeat this markup, no tools" (quoted <tool_call>) -> PHANTOM CALL fired
+- bare <function=calc> legacy form                      -> PHANTOM CALL fired
+- fenced example                                        -> no call (model
+  happened to behave)
+Root causes found in OUR engine-parser stack (vllm/parser/):
+1. qwen3_config had a (CONTENT, FUNC_PREFIX) fallback transition: a bare
+   <function= opens a call without the trained <tool_call> wrapper.
+2. validate_tool_names existed in the engine but defaults False: calls to
+   ANY name fire, offered or not (unit battery: a call to "nukes" passed).
+3. No code-fence awareness: quoted markup inside ``` fires once the model
+   emits it raw.
+
+## The port (patches/parser-hardening.diff, 3 files + test)
+- qwen3.py: removed the CONTENT/FUNC_PREFIX fallback — a terminal with no
+  transition is emitted as content by construction, so bare <function=
+  stays text. validate_tool_names=True and
+  suppress_tool_terminals_in_code_fence=True for the qwen3 family.
+- parser_engine_config.py: new config flag
+  suppress_tool_terminals_in_code_fence (default off, zero blast radius for
+  other engine parsers).
+- streaming_parser_engine.py: while a ``` fence is open, tool-ENTRY
+  terminals (transitions from a plain state into a tool state) are
+  re-emitted as content; fence state tracked on plain-state content runs by
+  backtick-run counting with a chunk CARRY, so a fence split across stream
+  deltas toggles exactly once (the naive count version failed exactly that
+  case in the 7-char streaming battery and would suppress real calls).
+
+## Gates
+Unit battery (tests/test_parser_canaries.py, CPU stand, real tokenizer,
+thinking-off lane; runs non-streaming AND streaming in 7-char chunks):
+- BEFORE: 4 failures — bare, fenced, not-offered-name all fired, and a
+  fenced example + following real call produced 2 calls.
+- AFTER: 7/7 ALL GREEN — real single/double/after-fence calls live, all
+  phantom classes dead, text preserved verbatim.
+Prod battery after the bounce (repeat-exactly prompts, tools=[calc]):
+- real-call                     -> fires ('calc')            [pi compatible]
+- bare <function=               -> NO call, text preserved
+- not-offered name "nukes"      -> NO call
+- fenced ```...<tool_call>...   -> NO call, text preserved verbatim
+- unfenced quote of OFFERED tool-> still fires (documented residual, the
+  same limit inordic states: agents running risky tools should keep a
+  confirmation step)
+Deploy: idle-window bounce 11-06 ~16:3x UTC, ready in 270 s, engine logs
+clean (0 errors), image files were byte-identical pre-patch (binds = clean
+overlay, launcher lines verified with docker exec grep).
+
+## pi exposure note
+pi quotes tool-call markup in analysis/docs/code examples: those used to
+become real calls (or calls to invented tools). Now only a complete,
+UNfenced <tool_call> for an OFFERED tool still fires — the model's genuine
+call format.
