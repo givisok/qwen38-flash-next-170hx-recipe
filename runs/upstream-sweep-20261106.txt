@@ -1,0 +1,97 @@
+# Upstream sweep 2026-11-06 (two days after the 11-04 sweep): the Qwen4Exp /
+# GDN lane is suddenly MOVING — a merged take candidate + the watch-series
+# trigger fired. Sources checked: vllm-project/vllm (tracked PR statuses +
+# everything merged since 11-04 by keyword), clee/vllm-sm80 (our fork base),
+# 1CatAI/1Cat-vLLM.
+
+## Merged into vllm main since 11-04 — our domains
+1. #66064 [Perf][GDN] Fuse prefill state gather/scatter with the shared
+   Triton kernels — MERGED 11-06 09:07 UTC, 7 files +145/-30. Qwen3-Next/
+   Qwen3.5 linear attention + Kimi KDA prefill: replaces 4-5 eager kernels
+   per layer per batch with ONE bandwidth-bound kernel per direction.
+   1.16-1.50x per-layer prefill chain on B300; decode unchanged; bitwise
+   parity claimed. TAKE CANDIDATE #1: our GDN prefill lane (chunk 864, PP3,
+   storm pain is prefill); the target kernels ALREADY EXIST in our tree
+   (mamba/ops/gather_initial_states.py + scatter_states.py, used by
+   kimi_gdn_linear_attn and glm5next kda), so the port is small. Plan:
+   branch port -> prefill bench vs dflash2-pool -> gates -> only then prod.
+2. #55688 [Mamba] Unify FI ReplaySSM STP/MTP/Prefix Caching Lifecycle —
+   MERGED 11-04 21:16, 44 files +3677/-1457. THE watch-series trigger
+   fired. Claims include "fixes Mamba page alignment and checkpoint
+   publication before block release" — the same class as our 11-04 crash
+   fix. Strategic: a base-jump rebase onto post-#55688 main could REPLACE
+   our hand-rolled stack (prefix-replay-depth port + both crash fixes)
+   with the unified upstream lifecycle. Fresh merge — expect a follow-up
+   fix wave; plan the rebase as a project, not a cherry-pick. Our fork
+   base (clee 0.31.1rc1.dev253) is orphaned: clee has 0 commits since
+   10-25, upstream accelerates in our domains every week.
+3. #54625 [Core] cache-aware admission ordering — MERGED 11-04, +322/-0.
+   Within a bounded look-ahead window over the waiting queue, admit
+   requests whose prefix is already resident ahead of cold requests (a
+   cold admission under pressure evicts blocks that queued requests still
+   need — turning would-be hits into recomputation). Exactly our
+   TRUE-MISS-storm domain. Let it settle, then storm A/B candidate.
+4. #65300 [Perf][Core] GC-untrack per-request token/block lists — MERGED
+   11-04, 17 files +290/-124. Removes EngineCore cyclic-GC pauses; our
+   1M-token prompt lists are the target class. Rebase freebie; port
+   separately only if we ever measure step-time jitter from GC.
+5. #65831 per-block CPU cost of KV allocation/caching — MERGED 11-06;
+   mostly the async-KV-load lane (not our topology), but it touches our
+   patched files -> rebase-conflict note.
+6. #65619 [Perf][Qwen4Exp] share the QSA top-k buffer across layers —
+   MERGED 11-04. At our max_num_batched_tokens=8192 and 4 QSA layers per
+   rank (48 layers over PP3): roughly 256 MB/rank back to the KV pool.
+   Rebase freebie, not worth an emergency port.
+7. #65692 route the PLE shard copy through copy_weight_ — MERGED 11-05
+   (load-time one-liner, #58868 follow-up). Freebie.
+8. #65812 honor checkpoint FP8 KV scales in Qwen4Exp QSA — MERGED 11-05.
+   We run kv fp8_e4m3; the leoncca AWQ checkpoint likely carries no k/v
+   output scales (then this is a no-op for us). Verify at rebase.
+9. #64059 DFlash draft acceptance-0 with FULL CUDA graphs — MERGED.
+   dflash k5 shelf note: in if we ever revisit that lane.
+10. #63231 default block-size 16 -> 64 — we pin 1728 explicitly; no impact.
+11. #64625 closed by emmericp: "Superseded by #66064". The mixed-GDN CUDA
+    graphs pair #61779/#61952 is still open, untouched since 11-03.
+
+## Open, not ours (kept cold)
+#65836 local argmax reduction for NVIDIA MTP (a TP>1 vocab-logit reduction;
+we are TP1 — no collective to save), #65738 adaptive-verification chunk cap
+(we don't run AV), #65843 SM120, #65628/#65911/#65754/#65749 ROCm,
+#65606 SM90 TP4/8, #65637 SubGPU green-context pools (exotic), #65642
+hybrid-cache spec cleanup (open — a rebase-pain predictor in our patch
+zone), RecoverSSM #66040 (KDA FP32-state verify kernels, watch). EXL3: cold.
+
+## Other sources
+- clee/vllm-sm80 (our fork origin and base): 0 commits since 10-25 — dead.
+- 1CatAI/1Cat-vLLM: 30 commits in 2 days — V100 1.5.2 release prep
+  (launchers #1397, hard-coded-key drop #1396, SM70 image #1395, prefill
+  JIT-recompile fix #1394, DFlash2 sampler graph #1393). Nothing portable
+  to SM80. Their #1360 (keep external prefix hits on the Mamba page grid)
+  is the same bug CLASS as our 11-03/04 crashes — validates the family;
+  the fix lives in their hand-rewritten scheduler.
+
+## Prod observations from the same pass (no action taken)
+- The container was manually bounced (docker stop+start) 11-05 15:33 UTC:
+  RestartCount=0, OOM=false, ExitCode=0; logs preserved since the 11-04
+  15:24 deploy.
+- 40 [partial-cow] stale-record degradations — ALL on 11-05 (first
+  08:24:14, last 22:04 UTC), none on 11-04 or 11-06; [hash-promote] 0;
+  zero Tracebacks; preemptions 0; aborts 0. Pattern: exactly 4 events per
+  affected request (~10 requests) = the MTP-4 speculative-token count —
+  the signature of _relocate_speculative_block rewriting the block table
+  while producer records from the end-of-step caching pass are still
+  pending. The fixes absorbed every one (each event = one landing state
+  left unpublished; engine never at risk). The degraded path is now
+  PROVEN live in prod, not just theoretical. Follow-up offered: make the
+  relocation path republish (or not consume) those records so the landing
+  states stay cached.
+- Warning-noise spike 11-05 14-15h (~118 lines) sampled benign (startup
+  JIT warmup + per-request chat-template notices); jit_monitor total 21,
+  system-first-ordering total 2.
+
+## Verdict
+Nothing taken into prod today; prod state unchanged (prod-mtp4-20261104,
+no new tag). Take candidate #1 = #66064 GDN prefill fusion (small port,
+our lane, kernels already in our tree) — offered as branch + prefill
+bench. Strategic = plan a base-jump rebase after #55688 settles. Storm
+lever for later = #54625 admission ordering.
