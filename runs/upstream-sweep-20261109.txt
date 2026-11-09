@@ -74,3 +74,32 @@ NOTHING taken today; prod state unchanged (prod-mtp4-20261106-2, fork
 dflash2-pool @ 3d55bcefc3). Two honest closures: #65874 (sm90 clusters —
 physics), #62344 re-check (still BF16-gated). The pending candidate
 remains the n-gram #60615 re-derivation port. No new tag (no prod change).
+
+## Post-sweep follow-up: vllm#59468 (the v0.33.0 "2.47x DSpark" news)
+User flagged the v0.33.0 release note. The PR is OLD NEWS for us: merged
+2026-10-15, recorded as merged in the 11-03 dflash-wave sweep. Checked
+against our fork rather than the headline:
+
+- WHAT IT FIXED: max_num_new_slots_for_drafting() charged DFlash K and
+  DSpark K-1 EXTRA scheduler slots per request for draft queries that run
+  in a separate pass; the fix zeroes them and enforces draft-buffer
+  capacity as a concurrency cap instead.
+- OUR PROD (method=mtp): the same function in our base (config/
+  speculative.py:1893, pre-fix table) returns 0 for mtp — mtp is not
+  dflash, not parallel_drafting, not a draft_model. MTP reserved nothing
+  before the PR and nothing after: NOTHING TO RECLAIM. Decode target
+  batch = 16 reqs x (K+1)=5 -> 80 tokens of the 8192 budget, and those
+  are real verification tokens, not reservations.
+- SCALE CHECK for the dflash k5 shelf: even on our base's pre-fix code,
+  K=5 x 16 seqs = 80 slots of 8192 = 1%. Their +147% needed 52-64
+  concurrent requests squeezing the token budget into prefill slivers.
+  Our 16-seq geometry cannot enter that regime; the fix rides free with
+  the base-jump rebase if we ever revive dflash (alongside #64059).
+- NICE CONFIRMATION: their failure chain "prefill slivers -> mixed
+  prefill/decode steps -> miss the FULL decode graph" is exactly our
+  measured storm property (4-5 tok/s inside chunks). On their box the
+  slivers came from the bad reservation; ours come from the deliberate
+  864 chunk (campaign-proven optimum). Same physics, different cause.
+
+Verdict: closed for prod; rebase freebie for the dflash shelf; no tag,
+no code change.
