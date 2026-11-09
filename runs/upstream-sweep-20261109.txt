@@ -1,0 +1,76 @@
+# Upstream + peer sweep 2026-11-09 (three days after the 11-06 sweep).
+# Sources: vllm-project/vllm (tracked PR statuses, 203 commits merged since
+# 11-06 scanned by keyword, new PRs opened since 11-06), all 5 peer repos.
+
+## Peers: ALL QUIET
+0 commits since 11-06 in inordic/cmp170hx-vllm-qwen38-flash-next,
+2dameneko/vllm-Qwen3.8-Flash-Next-2xCMP170HX, iIIusi0n/qwen3.8-flash-next-cmp170hx,
+vektorprime/qwen38-flash-next-pp2, xris99/qwen3.8-flash-next-cmp170hx.
+
+## Merged upstream since 11-06 — our domains, verdicts
+1. #65874 [Kernel][Perf] Fused GDN MTP: DSpark K=8 + idle SMs at small
+   batch — MERGED 11-06. Headline sounded like our solo-decode lane, but
+   the idle-SM mechanism is SplitV via CTA clusters with DSMEM partial-sum
+   exchange: the kernel guards `__CUDA_ARCH__ < 900 -> __trap()`. Clusters
+   exist only on Hopper+; our sm_80 GA100 cannot run it. CLOSED with
+   physics, no port. (kMaxMtpTokens 8->9 bump is DSpark K=8 plumbing.)
+2. #64315 [Model][Qwen4Exp] routed experts on DeepGEMM MegaMoE (MXFP8/4) —
+   MERGED 11-09. Quant-format gated (MXFP8/MXFP4); we run AWQ W4A16 g32.
+   Not applicable. Watch only if an AWQ lane ever appears there.
+3. #66177 [Spec Decode][PP] centralize auxiliary hidden-state relay —
+   MERGED 11-09. EAGLE3-focused refactor of pp_utils/interfaces; our MTP
+   head is not in the touched model list. Rebase-conflict note only
+   (touches v1/worker/gpu/model_runner.py = our patched zone).
+4. #66048 fix spec-decode insert-resampled race; #65270 MRV2 mixed
+   draft-model warmup token budget; #65229 acceptance-estimator
+   catastrophic cancellation; #58094 rope hf_overrides to MTP draft — all
+   merged, all in MRV2 spec-decode. Our base predates them; no observed
+   symptom in prod logs (0 errors, warmup fine, acceptance counters sane).
+   Rebase freebies, not bind ports.
+5. #62675 [Bugfix][ROCm] pad Qwen4Exp PLE n-gram inputs for piecewise
+   CUDA-graph replays — ROCm-gated; signal only: the PLE/n-gram input
+   path is active upstream. Rebase note.
+6. #66461 exclude HC padding shard from loaded-shard check (Qwen4Exp) —
+   load-time bugfix, we load fine. Rebase freebie.
+7. Kimi K3.1 series (#66030/#66037), GLM 5.3 sm100 MoE TMA, DSv4/MiniMax
+   ROCm lanes, CPU GDN spec update #64829 — not our hardware/model.
+
+## Tracked open PRs — status changes
+- #62344 QSA sm_80 launch config: UPDATED 11-07 (first activity since
+  10-20) but the body still says "sm_80 config for the BF16 indexer
+  cache"; no FP8 config appeared. Still closed for our fp8_e4m3 KV lane.
+  The compressor one-warp-per-row part (1.05-1.32x) is thinner than the
+  #65470 slice we already measured as all-noise. Watch for an FP8 config.
+- #66040 Deferred RecoverSSM verify kernels (FP32-state KDA): updated
+  TODAY 11-09 — the ReplaySSM wave is still moving. Base-jump rebase
+  stays on hold until this series settles.
+- #61779/#61952 (mixed GDN CUDA-graphs pair = our port trigger): open,
+  untouched since 11-03. #64205 touched 11-06, still open.
+- #60615 n-gram before MTP: untouched since 10-16 — no free ride coming;
+  the re-derivation port stays the plan (dedicated window, solo-
+  repetitive A/B, acceptance from /metrics).
+- #50986/#57553 parser fixes: still open; we already shipped the
+  equivalents engine-side (prod-mtp4-20261106-2).
+
+## New PRs since 11-06 worth tracking (none actionable today)
+- #66361 opt-in aging for cache-aware admission — the #54625 storm-lever
+  lane is developing. When it settles: storm A/B with admission ordering
+  ON becomes the campaign candidate.
+- #66169 K0 spec-window slot release for hybrid mamba models — pool-
+  pressure lever in exactly our class (GDN hybrid + MTP). Open, early.
+- #66148 size QSA decode logits workspace for worst-case decode batch —
+  Qwen4Exp crash/OOM class; we run 16 seqs, capture 1..80. Watch; check
+  our tree's workspace sizing if we ever raise max-num-seqs.
+- #66176 single-group prefix-cache hit = one dict get per block — host-
+  side prefix-cache perf; our cache manager is heavily patched, this is a
+  rebase-pain predictor more than a port.
+- #66341 divergence-point prefix-cache salting (cache_salt_start_idx) —
+  concept for agent traffic sharing long system prompts; not our pain.
+- #66318 Mamba2 ReplaySSM on Triton backend — another input to the
+  future base-jump rebase.
+
+## Verdict
+NOTHING taken today; prod state unchanged (prod-mtp4-20261106-2, fork
+dflash2-pool @ 3d55bcefc3). Two honest closures: #65874 (sm90 clusters —
+physics), #62344 re-check (still BF16-gated). The pending candidate
+remains the n-gram #60615 re-derivation port. No new tag (no prod change).
