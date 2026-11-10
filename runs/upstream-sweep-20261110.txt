@@ -1,0 +1,40 @@
+# Sweep 2026-11-10 (24h delta). Peers: all 5 still 0 commits. Upstream:
+# nothing to take. One candidate examined and closed: vllm#66148.
+
+## vllm#66148 [Bugfix][Qwen4Exp] QSA decode logits workspace — CLOSED
+# NOT MERGED (author: "an issue report, not a proposed solution").
+Their failure: workspace allocated per step at the CURRENT decode batch
+(qsa_indexer.py `logits = torch.empty((q.shape[0], columns), fp32)` —
+byte-identical class exists in OUR fork, nvidia/ops/qsa_indexer.py:598);
+batch growth past warmup grows reserved memory past what profiling
+measured; with their config (max-num-seqs 128 x MTP-3 = 512 rows, default
+gpu_memory_utilization = 1.0, extensible KV, allocator hard-capped, ~1 GiB
+free of 267) that OOMs mid-serving in the MTP drafter prefill rms_norm.
+
+Our geometry cannot enter that regime:
+- decode rows bounded at 16 seqs x (1+4) = 80 = exactly our capture cap
+  [1..80]; larger eager allocations only in the prefill path, which runs
+  at the constant 864/8192 budget every step (stable, allocator-cached);
+- gmu 0.95 leaves ~3 GiB/card slack vs their hard cap at 1.0 + extensible;
+- our pool is a classic pre-sized pool (not extensible), and weeks of prod
+  show zero OOM with stable memory.
+
+Verdict: NOT a port. Watch item only: if max-num-seqs is ever raised,
+apply the PR's pattern (allocate the workspace at max_num_seqs x
+(1+num_spec_tokens) so warmup and serving share one block) — 3 lines.
+Also relevant at the base-jump rebase if the class persists there.
+
+## Rest of the 24h delta (75 commits scanned)
+- #66512 [Perf][Qwen4Exp] QSA kernel for large fp8 batches on Blackwell —
+  merged; Blackwell-gated, not sm_80. Skip.
+- #63432 [Bugfix][Spec Decode] keep YaRN drafts within their rotary cache —
+  same bug CLASS as our dflash-k5 YaRN 262k wall (we fixed ours manually
+  11-02 via draft max_position_embeddings). Shelf note for dflash at
+  rebase; prod MTP unaffected.
+- #66040 re-scoped "[Kimi-K3] Deferred RecoverSSM verify kernels" — the
+  RecoverSSM follow-up wave is Kimi-K3-lane; still our settle signal for
+  the base-jump rebase. #66169 (K0 spec-slot release) still moving.
+- Trigger pair #61779/#61952 cold since 11-03; #60615 n-gram untouched.
+
+Prod unchanged (prod-mtp4-20261106-2); no tag. Next candidate remains the
+n-gram #60615 re-derivation port.
