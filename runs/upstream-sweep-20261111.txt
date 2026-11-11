@@ -1,0 +1,37 @@
+# Sweep 2026-11-11. Peers: all 5 quiet (inordic 6 days). clee base: still
+# dead (0 since 10-25). Main finding: our trigger pair is ALIVE and being
+# pushed to merge — with a new dependency that changes port economics.
+
+## Trigger pair #61779/#61952 (mixed GDN CUDA graphs) — active again
+Author pushed 11-11: both rebased onto current main a58e84c8c, docstring/
+style cleanup, "keep the decode staging code of main" (review-feedback
+compliance), third reviewer ping since 10-21 (now pointing the reviewers
+who know #66064/#55688 at the stack). #61952 history shows repeated
+mergiof conflicts, each resolved — the author keeps it mergeable.
+
+NEW FACT: the pair is now built on main WITH #55688 (unified ReplaySSM
+lifecycle, merged 11-04, 44 files) — which our fork does NOT carry. If
+the pair merges, a standalone cherry-pick onto our fork = conflict
+surgery through #55688-shaped code. The right move then is to fold it
+into the base-jump rebase, not a separate port. Our 11-03 measurement
+verdict also still stands (on the old base: storm parity — our steps are
+GPU-bound, and the buffer-staging tax cost solo -6..11%).
+
+Consequence: the "first merge of the series = port" trigger is DOWNGRADED
+to "first merge = add to the base-jump rebase scope".
+
+## ReplaySSM wave: still hot, rebase still on hold
+#61501 [Perf][Mamba] opt-in FlashInfer SSD prefill scan + per-step
+ReplaySSM seed — MERGED 11-11. Series now: #55688 (in), #61501 (in),
+#66040 (open), #66318 (open). Not settling yet.
+
+## 1CatAI/1Cat-vLLM: 30 commits since 11-06 (active burst)
+Qwen MTP/QK-fusion acceleration across TP shards + DeepSeek-V4.1 PP4xTP4
+on 16 V100s + a prefill-scheduling/PLE-ownership audit. Their lane is
+TP-heavy SM70; we are TP1 SM80 — not portable (standing verdict). Watch
+their PLE audit for ideas only.
+
+## Other
+#62344 (QSA sm_80) rebased again 11-11, still BF16-gated. #66040, #66169
+still moving. Nothing new to take. Prod unchanged
+(prod-mtp4-20261106-2); no tag. Pending candidate remains n-gram #60615.
