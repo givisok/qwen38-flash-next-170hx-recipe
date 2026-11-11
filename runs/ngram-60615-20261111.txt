@@ -53,3 +53,21 @@
 Tag: prod-mtp4-ngram-20261111. Fork dflash2-pool @ d97883e032. Launcher
 default CONFIG = ngram yml. Revert recipe documented in the launcher
 comment line.
+
+## Same evening: REAL pi traffic check (session-level, client durationMs + usage)
+Last session (media-platform, 11-11 13:09 UTC, 222 qwen3.8 turns, post-ngram)
+vs three pre-ngram sessions (same project 11-10 x2 + wec-web 11-11 morning):
+  session              arm    turns  weighted TPS  long-turn median
+  media-plat 11-11     ngram   222       103.0          107.8
+  media-plat 11-10b    mtp     176       101.9          112.8
+  media-plat 11-10a    mtp     279        99.5          104.9
+  wec-web    11-11     mtp     243       105.5          111.6
+The ngram session sits INSIDE the pre-arm's own session-to-session spread
+(weighted 99.5-105.5 = +/-3%; long median 104.9-112.8). Right tail
+(>120/>140/>170 tok/s share) also within spread; >170 = 0% everywhere.
+Verdict: on the user's actual traffic (RU-analysis + PHP agent, xhigh
+thinking, 99% cacheRead prefixes) ngram is NEUTRAL at session level — the
+probe profile holds (echo turns are rare here; reasoning tax ~3% is
+borderline and invisible in the mix). Keeping it: harmless on this mix,
+protects the echo class when it appears (document-quote sessions), revert
+stays one line. No prod change, no new tag.
