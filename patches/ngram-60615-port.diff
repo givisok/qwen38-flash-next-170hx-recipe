@@ -1,0 +1,859 @@
+diff --git a/tests/v1/e2e/spec_decode/mtp/_correctness.py b/tests/v1/e2e/spec_decode/mtp/_correctness.py
+index 352aa556e0..93e488c4cb 100644
+--- a/tests/v1/e2e/spec_decode/mtp/_correctness.py
++++ b/tests/v1/e2e/spec_decode/mtp/_correctness.py
+@@ -24,6 +24,8 @@ def check_mtp_correctness(
+     mm_enabled: bool,
+     expected_accuracy_threshold: float,
+     vllm_runner,
++    extra_speculative_config: dict[str, Any] | None = None,
++    spec_llm_kwargs: dict[str, Any] | None = None,
+ ):
+     """Compare the outputs of a original LLM and a speculative LLM
+     which should be the same when using MTP speculative decoding. Due to some variance
+@@ -73,6 +75,8 @@ def check_mtp_correctness(
+         if draft_model is not None:
+             speculative_config["model"] = draft_model
+             speculative_config["num_speculative_tokens"] = 2
++        if extra_speculative_config is not None:
++            speculative_config.update(extra_speculative_config)
+ 
+         with vllm_runner(
+             model_name,
+@@ -85,6 +89,7 @@ def check_mtp_correctness(
+             enable_chunked_prefill=None,
+             compilation_config=CompilationConfig(),
+             **extra_kwargs,
++            **(spec_llm_kwargs or {}),
+         ) as spec_runner:
+             # MTP supports async scheduling by default.
+             has_async = (
+diff --git a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
+index c61838a655..ff30a8cf96 100644
+--- a/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
++++ b/tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++from typing import Any
+ 
+ import pytest
+ 
+@@ -10,15 +11,31 @@ from .._correctness import check_mtp_correctness
+ 
+ 
+ @pytest.mark.parametrize(
+-    ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
++    [
++        "model_setup",
++        "mm_enabled",
++        "expected_accuracy_threshold",
++        "extra_spec_config",
++        "spec_llm_kwargs",
++    ],
+     [
+         (
+             ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1, None),
+             False,
+             0.20,
++            None,
++            None,
+         ),  # hybrid + MTP, ref: ~34%-35%
++        (
++            ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1, None),
++            False,
++            0.0,  # GSM8K is covered above; one request at a time is slow
++            {"num_speculative_tokens": 3, "ngram_lookup": True},
++            # The lookup only runs for single-request batches.
++            {"max_num_seqs": 1},
++        ),
+     ],
+-    ids=["qwen3_5-hybrid"],
++    ids=["qwen3_5-hybrid", "qwen3_5-hybrid-ngram-lookup"],
+ )
+ @single_gpu_only
+ def test_mtp_correctness(
+@@ -27,6 +44,8 @@ def test_mtp_correctness(
+     model_setup: tuple[str, str, int, str | None],
+     mm_enabled: bool,
+     expected_accuracy_threshold: float,
++    extra_spec_config: dict[str, Any] | None,
++    spec_llm_kwargs: dict[str, Any] | None,
+     vllm_runner,
+ ):
+     check_mtp_correctness(
+@@ -36,4 +55,6 @@ def test_mtp_correctness(
+         mm_enabled,
+         expected_accuracy_threshold,
+         vllm_runner,
++        extra_speculative_config=extra_spec_config,
++        spec_llm_kwargs=spec_llm_kwargs,
+     )
+diff --git a/tests/v1/spec_decode/test_ngram_gpu.py b/tests/v1/spec_decode/test_ngram_gpu.py
+index 0170b58ad1..3372db9409 100644
+--- a/tests/v1/spec_decode/test_ngram_gpu.py
++++ b/tests/v1/spec_decode/test_ngram_gpu.py
+@@ -193,7 +193,7 @@ def test_picks_longest_match_among_2_3_4_grams():
+ def test_picks_rightmost_when_multiple_matches(max_model_len):
+     """Pick the last valid match across blocks, ignoring trailing tokens."""
+     spec = _make_speculator(min_n=3, max_n=3, k=2, max_model_len=max_model_len)
+-    padding = [0] * (spec.block_l - 5) if spec.n_blocks > 1 else []
++    padding = [0] * (spec.lookup.block_l - 5) if spec.lookup.n_blocks > 1 else []
+     row = [1, 2, 3, 100] + padding + [1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]
+     drafts = _propose(spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)])
+     assert drafts == [[300, 1]]
+@@ -277,3 +277,129 @@ def test_construction_validates_speculative_config():
+     # No-op hooks must not raise.
+     spec.init_cudagraph_manager(None)
+     spec.capture()
++
++
++@pytest.mark.parametrize(
++    ("k", "expected"), [(2, [True, False, False]), (4, [False] * 3)]
++)
++def test_lookup_reports_full_length_matches(k, expected):
++    """has_match is set only where all k drafts were copied from the context."""
++    spec = _make_speculator(min_n=2, max_n=2, k=k)
++    rows = [[1, 2, 3, 1, 2], [4, 5, 6], [1, 2, 3, 1, 2]]
++    _propose(spec, rows, num_sampled=[1, 1, 0])
++    assert spec.lookup.has_match[:3].tolist() == expected
++
++
++class _FakeMTPPropose:
++    """Stands in for the MTP chain: records the draft steps it would run."""
++
++    def __init__(self, fill: int):
++        self.fill = fill
++        self.draft_steps: list[int] = []
++
++    def install(self, monkeypatch) -> None:
++        from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
++            TargetDependentARSpeculator,
++        )
++
++        def propose(speculator, input_batch, *args, **kwargs):
++            k = speculator.num_speculative_steps
++            self.draft_steps.append(speculator.num_draft_steps(k))
++            drafts = speculator.draft_tokens[: input_batch.num_reqs]
++            drafts.fill_(self.fill)
++            return drafts
++
++        monkeypatch.setattr(TargetDependentARSpeculator, "propose", propose)
++
++
++def _make_ngram_mtp(min_n: int, max_n: int, k: int):
++    from vllm.v1.worker.gpu.spec_decode.mtp.speculator import NgramMTPSpeculator
++    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramLookup
++
++    ngram = _make_speculator(min_n=min_n, max_n=max_n, k=k)
++    speculator = object.__new__(NgramMTPSpeculator)
++    speculator.num_speculative_steps = k
++    speculator.req_states = ngram.req_states
++    speculator.max_num_reqs = ngram.max_num_reqs
++    speculator.draft_tokens = torch.zeros(
++        (ngram.max_num_reqs, k), dtype=torch.int64, device=DEVICE
++    )
++    speculator.ngram = NgramLookup(
++        min_n, max_n, k, ngram.max_num_reqs, ngram.max_model_len, DEVICE
++    )
++    speculator.matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
++    speculator.matched_event = torch.cuda.Event()
++    speculator.wait_for_lookup = False
++    speculator.draft_logits = None
++    return speculator
++
++
++@pytest.mark.parametrize(
++    ("rows", "expected_drafts", "expected_steps"),
++    [
++        # A full match: copied drafts, only the MTP draft prefill runs.
++        ([[1, 2, 3, 1, 2, 3, 1, 2]], [[3, 1, 2]], [1]),
++        # No match: the MTP chain runs in full.
++        ([[4, 5, 6]], [[9, 9, 9]], [3]),
++        # A partial copy (2 of 3 tokens) falls back to MTP.
++        ([[1, 2, 1, 2]], [[9, 9, 9]], [3]),
++        # More than one request: MTP alone, no lookup.
++        ([[1, 2, 3, 1, 2]] * 2, [[9, 9, 9]] * 2, [3]),
++    ],
++)
++def test_ngram_mtp_copies_and_skips_for_a_single_request(
++    monkeypatch, rows, expected_drafts, expected_steps
++):
++    fake = _FakeMTPPropose(fill=9)
++    fake.install(monkeypatch)
++    speculator = _make_ngram_mtp(min_n=2, max_n=2, k=3)
++    drafts = _propose(speculator, rows, last_sampled=[9] * len(rows))
++    assert drafts == expected_drafts
++    assert fake.draft_steps == expected_steps
++
++
++def test_copied_drafts_stay_exact_under_probabilistic_verification():
++    """One-hot draft logits for copies: accepted with p(token), output ~ p."""
++    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
++        write_one_hot_draft_logits,
++    )
++    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
++        rejection_sample,
++    )
++
++    torch.manual_seed(0)
++    vocab, trials, copied = 16, 200_000, 3
++    target = torch.randn(vocab, device=DEVICE)
++    stale = torch.randn(trials, 1, vocab, device=DEVICE)
++    draft_logits = stale.clone()
++    has_match = torch.arange(trials, device=DEVICE) % 2 == 0
++    idx = torch.arange(trials, dtype=torch.int32, device=DEVICE)
++    drafts = torch.full((trials, 1), copied, dtype=torch.int64, device=DEVICE)
++    write_one_hot_draft_logits(draft_logits, idx, has_match, drafts)
++    assert torch.equal(draft_logits[~has_match], stale[~has_match])
++
++    rows = has_match.nonzero().squeeze(1)
++    n = rows.numel()
++    draft_sampled = torch.zeros(n, 2, dtype=torch.int64, device=DEVICE)
++    draft_sampled[:, 1] = copied
++    sampled, num_sampled = rejection_sample(
++        target.expand(2 * n, -1).contiguous(),
++        draft_logits,
++        draft_sampled.view(-1),
++        torch.arange(n + 1, dtype=torch.int32, device=DEVICE) * 2,
++        torch.arange(2 * n, dtype=torch.int32, device=DEVICE),
++        rows.int(),
++        rows.int().repeat_interleave(2),
++        torch.arange(2, dtype=torch.int32, device=DEVICE).repeat(n),
++        torch.ones(trials, device=DEVICE),
++        torch.arange(trials, dtype=torch.int64, device=DEVICE),
++        1,
++    )
++    p = torch.softmax(target, dim=0)
++    accept_rate = (num_sampled == 2).float().mean().item()
++    sigma = (p[copied].item() * (1 - p[copied].item()) / n) ** 0.5
++    assert abs(accept_rate - p[copied].item()) < 6 * sigma
++    counts = torch.bincount(sampled[:, 0], minlength=vocab).float()
++    expected = p * n
++    chi2 = ((counts - expected) ** 2 / expected).sum().item()
++    assert chi2 < (vocab - 1) + 10 * (2 * (vocab - 1)) ** 0.5
+diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
+index bbb9f44b93..93ce638c26 100644
+--- a/vllm/config/speculative.py
++++ b/vllm/config/speculative.py
+@@ -473,6 +473,12 @@ class SpeculativeConfig:
+     prompt_lookup_min: int | None = Field(default=None, ge=1)
+     """Minimum size of ngram token window when using Ngram proposer, if
+     provided. Defaults to 1."""
++    ngram_lookup: bool = False
++    """With method='mtp' and a single running request, draft by copying the
++    tokens that followed the last `prompt_lookup_min` to `prompt_lookup_max`
++    tokens (default 12 to 16) where they occur earlier in the context, and
++    skip the MTP decode steps; without a match, or with more requests, draft
++    with MTP alone. Requires Model Runner V2."""
+ 
+     # Alternative drafting strategies
+     parallel_drafting: bool = False
+@@ -1186,32 +1192,7 @@ class SpeculativeConfig:
+             self.method = "ngram"
+ 
+         if self.method in ("ngram", "ngram_gpu"):
+-            # Set default values if not provided
+-            if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
+-                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
+-                self.prompt_lookup_min = 5
+-                self.prompt_lookup_max = 5
+-            elif self.prompt_lookup_min is None:
+-                if self.prompt_lookup_max is None:
+-                    raise ValueError(
+-                        "Either prompt_lookup_max or prompt_lookup_min must be "
+-                        "provided when using the ngram method."
+-                    )
+-                self.prompt_lookup_min = self.prompt_lookup_max
+-            elif self.prompt_lookup_max is None:
+-                if self.prompt_lookup_min is None:
+-                    raise ValueError(
+-                        "Either prompt_lookup_max or prompt_lookup_min must be "
+-                        "provided when using the ngram method."
+-                    )
+-                self.prompt_lookup_max = self.prompt_lookup_min
+-
+-            # Validate values
+-            if self.prompt_lookup_min > self.prompt_lookup_max:
+-                raise ValueError(
+-                    f"prompt_lookup_min={self.prompt_lookup_min} must "
+-                    f"be <= prompt_lookup_max={self.prompt_lookup_max}"
+-                )
++            self._resolve_prompt_lookup_window()
+ 
+             # TODO: current we still need extract vocab_size from target model
+             # config, in future, we may try refactor it out, and set
+@@ -1261,8 +1242,16 @@ class SpeculativeConfig:
+             self.draft_parallel_config = self.target_parallel_config
+ 
+         else:
+-            self.prompt_lookup_max = 0
+-            self.prompt_lookup_min = 0
++            if self.ngram_lookup:
++                if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
++                    # Best of 5, 8 and 12 to 16 on SPEED-Bench, Blazedit and a
++                    # copy-heavy probe (#60615): a longer match replaces fewer
++                    # good MTP drafts with wrong copies.
++                    self.prompt_lookup_min, self.prompt_lookup_max = 12, 16
++                self._resolve_prompt_lookup_window()
++            else:
++                self.prompt_lookup_max = 0
++                self.prompt_lookup_min = 0
+ 
+             if self.model is not None:
+                 # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+@@ -1598,6 +1587,22 @@ class SpeculativeConfig:
+ 
+         return self
+ 
++    def _resolve_prompt_lookup_window(self) -> None:
++        if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
++            # TODO(woosuk): Tune these values. They are arbitrarily chosen.
++            self.prompt_lookup_min = self.prompt_lookup_max = 5
++        elif self.prompt_lookup_min is None:
++            self.prompt_lookup_min = self.prompt_lookup_max
++        elif self.prompt_lookup_max is None:
++            self.prompt_lookup_max = self.prompt_lookup_min
++        assert self.prompt_lookup_min is not None
++        assert self.prompt_lookup_max is not None
++        if self.prompt_lookup_min > self.prompt_lookup_max:
++            raise ValueError(
++                f"prompt_lookup_min={self.prompt_lookup_min} must "
++                f"be <= prompt_lookup_max={self.prompt_lookup_max}"
++            )
++
+     def _validate_suffix_decoding(self):
+         if not has_arctic_inference():
+             raise ImportError(
+@@ -1856,6 +1861,27 @@ class SpeculativeConfig:
+                 self.draft_parallel_config
+             )
+ 
++        if self.ngram_lookup:
++            if (
++                self.method != "mtp"
++                or self.use_gemma4_mtp()
++                or self.use_multi_module_mtp()
++            ):
++                raise ValueError(
++                    "ngram_lookup is only supported with method='mtp' and a "
++                    "single-module MTP drafter."
++                )
++            if self.enable_adaptive_verification:
++                raise ValueError(
++                    "ngram_lookup is incompatible with enable_adaptive_verification."
++                )
++            if (
++                self.target_parallel_config is not None
++                and self.target_parallel_config.data_parallel_size > 1
++            ):
++                # Skipping draft forwards on one rank would desync the others.
++                raise ValueError("ngram_lookup does not support data parallelism.")
++
+         if self.use_heterogeneous_vocab and not self.uses_draft_model():
+             raise ValueError(
+                 "use_heterogeneous_vocab only works with method='draft_model'"
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index b4298cd145..adeca21cef 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -3004,6 +3004,8 @@ class VllmConfig:
+                 unsupported.append("dspark speculative decoding")
+             if self.speculative_config.enable_adaptive_verification:
+                 unsupported.append("adaptive draft verification")
++            if self.speculative_config.ngram_lookup:
++                unsupported.append("n-gram lookup with MTP drafting")
+ 
+         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
+         if self._dflash_needs_multi_kv_group():
+diff --git a/vllm/v1/worker/gpu/spec_decode/__init__.py b/vllm/v1/worker/gpu/spec_decode/__init__.py
+index fc028941cf..a85c5041cb 100644
+--- a/vllm/v1/worker/gpu/spec_decode/__init__.py
++++ b/vllm/v1/worker/gpu/spec_decode/__init__.py
+@@ -61,6 +61,12 @@ def init_speculator(
+ 
+         return MultiModuleMTPSpeculator(vllm_config, device)
+     elif speculative_config.method == "mtp":
++        if speculative_config.ngram_lookup:
++            from vllm.v1.worker.gpu.spec_decode.mtp.speculator import (
++                NgramMTPSpeculator,
++            )
++
++            return NgramMTPSpeculator(vllm_config, device, req_states)
+         from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+ 
+         return MTPSpeculator(vllm_config, device)
+diff --git a/vllm/v1/worker/gpu/spec_decode/mtp/speculator.py b/vllm/v1/worker/gpu/spec_decode/mtp/speculator.py
+index a0064197f7..7b344ca7a4 100644
+--- a/vllm/v1/worker/gpu/spec_decode/mtp/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/mtp/speculator.py
+@@ -1,13 +1,27 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++from typing import TYPE_CHECKING, Any
++
++import torch
+ import torch.nn as nn
+ 
++from vllm.config import VllmConfig
++from vllm.utils.gpu_sync_debug import gpu_sync_allowed
++from vllm.v1.worker.gpu.dp_utils import DPSyncState
++from vllm.v1.worker.gpu.input_batch import InputBatch
+ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
++from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
++    NgramLookup,
++    write_one_hot_draft_logits,
++)
+ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+     TargetDependentARSpeculator,
+ )
+ 
++if TYPE_CHECKING:
++    from vllm.v1.worker.gpu.states import RequestState
++
+ 
+ class MTPSpeculator(TargetDependentARSpeculator):
+     share_mtp_topk_indices: bool = False
+@@ -57,3 +71,108 @@ class MTPSpeculator(TargetDependentARSpeculator):
+     def on_multi_step_decode_end(self, num_reqs: int) -> None:
+         if self.share_mtp_topk_indices:
+             self.model.model.set_skip_topk(False)
++
++
++class NgramMTPSpeculator(MTPSpeculator):
++    """MTP drafting that copies from the context on an n-gram match.
++
++    Only batches of one request use the lookup: the gain comes from skipping
++    the MTP decode steps, which needs every request to match, and a copy that
++    does not skip them only displaces the MTP draft. On a match the host waits
++    for the lookup (overlapped with the draft prefill, which always runs so the
++    draft KV cache stays complete) and skips the decode steps.
++    """
++
++    def __init__(
++        self,
++        vllm_config: VllmConfig,
++        device: torch.device,
++        req_states: "RequestState",
++    ):
++        super().__init__(vllm_config, device)
++        spec = self.speculative_config
++        assert spec.prompt_lookup_min is not None
++        assert spec.prompt_lookup_max is not None
++        self.req_states = req_states
++        self.ngram = NgramLookup(
++            spec.prompt_lookup_min,
++            spec.prompt_lookup_max,
++            self.num_speculative_steps,
++            self.max_num_reqs,
++            self.max_model_len,
++            device,
++        )
++        self.matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
++        self.matched_event = torch.cuda.Event()
++        self.wait_for_lookup = False
++
++    def num_draft_steps(self, num_speculative_tokens: int) -> int:
++        if not self.wait_for_lookup:
++            return num_speculative_tokens
++        self.wait_for_lookup = False
++        with gpu_sync_allowed():
++            self.matched_event.synchronize()
++        return 1 if self.matched_cpu.item() else num_speculative_tokens
++
++    @torch.inference_mode()
++    def propose(
++        self,
++        input_batch: InputBatch,
++        attn_metadata: dict[str, Any],
++        slot_mappings: dict[str, torch.Tensor],
++        last_hidden_states: torch.Tensor,
++        aux_hidden_states: list[torch.Tensor] | None,
++        num_sampled: torch.Tensor,
++        num_rejected: torch.Tensor,
++        last_sampled: torch.Tensor,
++        next_prefill_tokens: torch.Tensor,
++        temperature: torch.Tensor,
++        seeds: torch.Tensor,
++        dp_sync_state: DPSyncState | None = None,
++        dummy_run: bool = False,
++        skip_attn_for_dummy_run: bool = False,
++        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
++        is_profile: bool = False,
++        num_speculative_tokens: int | None = None,
++    ) -> torch.Tensor:
++        use_lookup = input_batch.num_reqs == 1 and not dummy_run
++        if use_lookup:
++            ngram_drafts, has_match = self.ngram.lookup(
++                self.req_states,
++                input_batch.idx_mapping,
++                num_sampled,
++                last_sampled,
++                1,
++            )
++            self.matched_cpu.copy_(has_match, non_blocking=True)
++            self.matched_event.record()
++            self.wait_for_lookup = True
++
++        draft_tokens = super().propose(
++            input_batch,
++            attn_metadata,
++            slot_mappings,
++            last_hidden_states,
++            aux_hidden_states,
++            num_sampled,
++            num_rejected,
++            last_sampled,
++            next_prefill_tokens,
++            temperature,
++            seeds,
++            dp_sync_state=dp_sync_state,
++            dummy_run=dummy_run,
++            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
++            mm_inputs=mm_inputs,
++            is_profile=is_profile,
++            num_speculative_tokens=num_speculative_tokens,
++        )
++        self.wait_for_lookup = False
++        if not use_lookup:
++            return draft_tokens
++        torch.where(has_match[:, None], ngram_drafts, draft_tokens, out=draft_tokens)
++        if self.draft_logits is not None:
++            write_one_hot_draft_logits(
++                self.draft_logits, input_batch.idx_mapping, has_match, ngram_drafts
++            )
++        return draft_tokens
+diff --git a/vllm/v1/worker/gpu/spec_decode/ngram/speculator.py b/vllm/v1/worker/gpu/spec_decode/ngram/speculator.py
+index b74a0ec4f9..17d1e96ca0 100644
+--- a/vllm/v1/worker/gpu/spec_decode/ngram/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/ngram/speculator.py
+@@ -98,6 +98,7 @@ def _ngram_finalize_kernel(
+     scratch_ptr,  # *int64  [B, scratch_stride]
+     scratch_stride,
+     drafts_ptr,  # *int64  [B, K]  (output)
++    has_match_ptr,  # *bool  [B]  (output)
+     L,
+     N_BLOCKS,
+     K: tl.constexpr,
+@@ -146,6 +147,163 @@ def _ngram_finalize_kernel(
+     # ordinary (rejectable) drafts, so the fill value only affects efficiency.
+     out = tl.where(slot_valid, gathered, last_tok)
+     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
++    # A partial copy pads with rejectable filler, so it does not count as a
++    # match for callers that would otherwise replace a full model draft.
++    tl.store(has_match_ptr + b, write_ok & (tokens_avail >= K))
++
++
++@triton.jit
++def _one_hot_draft_logits_kernel(
++    draft_logits_ptr,  # [max_num_reqs, K, V]
++    draft_logits_stride_0,
++    draft_logits_stride_1,
++    idx_mapping_ptr,  # [B]
++    has_match_ptr,  # [B]
++    drafts_ptr,  # [B, K]
++    drafts_stride,
++    vocab_size,
++    BLOCK_SIZE: tl.constexpr,
++):
++    b = tl.program_id(0)
++    if not tl.load(has_match_ptr + b):
++        return
++    step = tl.program_id(1)
++    offs = tl.program_id(2) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
++    req_state_idx = tl.load(idx_mapping_ptr + b).to(tl.int64)
++    token = tl.load(drafts_ptr + b * drafts_stride + step)
++    row = (
++        draft_logits_ptr
++        + req_state_idx * draft_logits_stride_0
++        + step * draft_logits_stride_1
++    )
++    vals = tl.where(offs == token, 0.0, float("-inf"))
++    tl.store(row + offs, vals.to(row.dtype.element_ty), mask=offs < vocab_size)
++
++
++def write_one_hot_draft_logits(
++    draft_logits: torch.Tensor,
++    idx_mapping: torch.Tensor,
++    has_match: torch.Tensor,
++    drafts: torch.Tensor,
++) -> None:
++    """Overwrite the cached draft logits of matched requests with one-hot rows.
++
++    Copied drafts are deterministic, so probabilistic verification must see
++    q = 1 on the copied token.
++    """
++    num_reqs, num_steps = drafts.shape
++    block_size = 1024
++    _one_hot_draft_logits_kernel[
++        (num_reqs, num_steps, triton.cdiv(draft_logits.shape[-1], block_size))
++    ](
++        draft_logits,
++        draft_logits.stride(0),
++        draft_logits.stride(1),
++        idx_mapping,
++        has_match,
++        drafts,
++        drafts.stride(0),
++        draft_logits.shape[-1],
++        BLOCK_SIZE=block_size,
++    )
++
++
++class NgramLookup:
++    """Batched GPU n-gram lookup over the request token history.
++
++    For each request, finds the longest suffix of length in [min_n, max_n]
++    that occurs earlier in its context (rightmost occurrence wins) and gathers
++    the `num_tokens` tokens that followed it.
++    """
++
++    def __init__(
++        self,
++        min_n: int,
++        max_n: int,
++        num_tokens: int,
++        max_num_reqs: int,
++        max_model_len: int,
++        device: torch.device,
++    ):
++        if not HAS_TRITON:
++            raise RuntimeError("GPU n-gram lookup requires Triton.")
++        assert 1 <= min_n <= max_n
++        self.min_n = min_n
++        self.max_n = max_n
++        self.num_tokens = num_tokens
++        self.max_model_len = max_model_len
++
++        L = max_model_len
++        if L >= 1024:
++            self.block_l = 256
++        elif L >= 256:
++            self.block_l = 128
++        elif L >= 64:
++            self.block_l = 64
++        else:
++            self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
++        self.n_blocks = triton.cdiv(L, self.block_l)
++
++        self.scratch = torch.zeros(
++            (max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
++        )
++        # Batch-ordered outputs.
++        self.drafts = torch.zeros(
++            (max_num_reqs, num_tokens), dtype=torch.int64, device=device
++        )
++        self.has_match = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
++
++    def lookup(
++        self,
++        req_states: RequestState,
++        idx_mapping: torch.Tensor,
++        num_sampled: torch.Tensor,
++        last_sampled: torch.Tensor,
++        num_reqs: int,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Returns ([num_reqs, num_tokens] drafts, [num_reqs] has_match).
++
++        Requests without a match (or that sampled nothing this step) get their
++        last sampled token in every slot and has_match False; so do the
++        slots past a partial copy, which also leaves has_match False.
++        """
++        token_ids = req_states.all_token_ids.gpu
++        _ngram_scan_kernel[(num_reqs, self.n_blocks)](
++            token_ids,
++            token_ids.stride(0),
++            idx_mapping,
++            req_states.total_len.gpu,
++            num_sampled,
++            self.scratch,
++            self.scratch.stride(0),
++            self.max_model_len,
++            self.min_n,
++            self.max_n,
++            max(1, triton.next_power_of_2(self.max_n)),
++            self.block_l,
++            num_warps=4,
++            num_stages=2,
++        )
++        _ngram_finalize_kernel[(num_reqs,)](
++            token_ids,
++            token_ids.stride(0),
++            idx_mapping,
++            req_states.total_len.gpu,
++            num_sampled,
++            last_sampled.view(-1),
++            self.scratch,
++            self.scratch.stride(0),
++            self.drafts,
++            self.has_match,
++            self.max_model_len,
++            self.n_blocks,
++            self.num_tokens,
++            max(1, triton.next_power_of_2(self.num_tokens)),
++            max(1, triton.next_power_of_2(self.n_blocks)),
++            num_warps=2,
++            num_stages=1,
++        )
++        return self.drafts[:num_reqs], self.has_match[:num_reqs]
+ 
+ 
+ class NgramGPUSpeculator(BaseSpeculator):
+@@ -160,8 +318,6 @@ class NgramGPUSpeculator(BaseSpeculator):
+         device: torch.device,
+         req_states: RequestState,
+     ):
+-        if not HAS_TRITON:
+-            raise RuntimeError("ngram_gpu speculative decoding requires Triton.")
+         spec = vllm_config.speculative_config
+         assert spec is not None
+         assert spec.prompt_lookup_min is not None, (
+@@ -170,40 +326,23 @@ class NgramGPUSpeculator(BaseSpeculator):
+         assert spec.prompt_lookup_max is not None, (
+             "prompt_lookup_max must be configured for ngram_gpu"
+         )
+-        assert 1 <= spec.prompt_lookup_min <= spec.prompt_lookup_max
+ 
+         self.vllm_config = vllm_config
+         self.device = device
+         self.req_states = req_states
+         self.speculative_config = spec
+         self.num_speculative_steps: int = spec.num_speculative_tokens
+-
+         self.min_n: int = spec.prompt_lookup_min
+         self.max_n: int = spec.prompt_lookup_max
+-
+         self.max_num_reqs: int = vllm_config.scheduler_config.max_num_seqs
+         self.max_model_len: int = vllm_config.model_config.max_model_len
+-
+-        L = self.max_model_len
+-        if L >= 1024:
+-            self.block_l = 256
+-        elif L >= 256:
+-            self.block_l = 128
+-        elif L >= 64:
+-            self.block_l = 64
+-        else:
+-            self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
+-        self.n_blocks = triton.cdiv(L, self.block_l)
+-
+-        self.scratch = torch.zeros(
+-            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
+-        )
+-        # Batch-ordered draft output, scattered into RequestState.draft_tokens
+-        # by the model runner (same contract as the model-based speculators).
+-        self.drafts = torch.zeros(
+-            (self.max_num_reqs, self.num_speculative_steps),
+-            dtype=torch.int64,
+-            device=device,
++        self.lookup = NgramLookup(
++            self.min_n,
++            self.max_n,
++            self.num_speculative_steps,
++            self.max_num_reqs,
++            self.max_model_len,
++            device,
+         )
+ 
+     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+@@ -235,45 +374,12 @@ class NgramGPUSpeculator(BaseSpeculator):
+     ) -> torch.Tensor:
+         num_reqs = input_batch.num_reqs
+         if dummy_run:
+-            return self.drafts[:num_reqs]
+-
+-        req_states = self.req_states
+-        token_ids = req_states.all_token_ids.gpu
+-        idx_mapping = input_batch.idx_mapping
+-
+-        _ngram_scan_kernel[(num_reqs, self.n_blocks)](
+-            token_ids,
+-            token_ids.stride(0),
+-            idx_mapping,
+-            req_states.total_len.gpu,
++            return self.lookup.drafts[:num_reqs]
++        drafts, _ = self.lookup.lookup(
++            self.req_states,
++            input_batch.idx_mapping,
+             num_sampled,
+-            self.scratch,
+-            self.scratch.stride(0),
+-            self.max_model_len,
+-            self.min_n,
+-            self.max_n,
+-            max(1, triton.next_power_of_2(self.max_n)),
+-            self.block_l,
+-            num_warps=4,
+-            num_stages=2,
+-        )
+-
+-        _ngram_finalize_kernel[(num_reqs,)](
+-            token_ids,
+-            token_ids.stride(0),
+-            idx_mapping,
+-            req_states.total_len.gpu,
+-            num_sampled,
+-            last_sampled.view(-1),
+-            self.scratch,
+-            self.scratch.stride(0),
+-            self.drafts,
+-            self.max_model_len,
+-            self.n_blocks,
+-            self.num_speculative_steps,
+-            max(1, triton.next_power_of_2(self.num_speculative_steps)),
+-            max(1, triton.next_power_of_2(self.n_blocks)),
+-            num_warps=2,
+-            num_stages=1,
++            last_sampled,
++            num_reqs,
+         )
+-        return self.drafts[:num_reqs]
++        return drafts
+diff --git a/vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py b/vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py
+index 02e28875b8..b259a4dfd9 100644
+--- a/vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py
+@@ -74,6 +74,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
+ 
+     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
+ 
++    def num_draft_steps(self, num_speculative_tokens: int) -> int:
++        """Draft steps to run this round, called after the draft prefill.
++
++        Returning 1 skips the multi-step decode; later draft slots are then
++        left stale and must be overwritten by the caller.
++        """
++        return num_speculative_tokens
++
+     @property
+     def advance_draft_positions(self) -> bool:
+         """Whether to increment positions and seq_lens between draft steps.
+@@ -333,6 +341,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
+             if num_speculative_tokens == 0:
+                 self.draft_tokens[:num_reqs].fill_(-1)
+             return self.draft_tokens[:num_reqs]
++        num_draft_steps = self.num_draft_steps(num_speculative_tokens)
++        if num_draft_steps <= 1:
++            return self.draft_tokens[:num_reqs]
+ 
+         if self.pcp_manager is not None and not dummy_run:
+             self.block_tables.gather_block_tables(
+@@ -372,7 +383,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
+         )
+         if self.decode_cudagraph_manager is not None:
+             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
+-                decode_batch_desc, num_speculative_tokens
++                decode_batch_desc, num_draft_steps
+             )
+         num_tokens_across_dp = (
+             decode_batch_sync.num_tokens_across_dp
+@@ -393,7 +404,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
+             decode_batch_desc,
+             num_tokens_across_dp,
+             input_batch.seq_lens_cpu_upper_bound,
+-            num_speculative_tokens,
++            num_draft_steps,
+         )
+         self.on_multi_step_decode_end(num_reqs)
+ 

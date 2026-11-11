@@ -1,0 +1,55 @@
+# 2026-11-11: vllm#60615 n-gram lookup in front of MTP drafting — PORTED,
+# QUALITY-PASSED, DEPLOYED to prod (first ngram day-one take; the re-derivation
+# feared earlier turned out unnecessary: the PR applies CLEAN onto our base).
+# Fork dflash2-pool @ d97883e032 (603a114026 port + 1-line-signature fix).
+
+## Port
+- PR diff (9 files, +521/-99) applied with git apply --check RC=0 — our base
+  (clee dev253 lineage) is close to the author's tree; no conflicts at all.
+- ONE startup crash on first bounce: our model_runner passes propose(
+  dp_sync_state=...) while the PR's NgramMTPSpeculator.propose names it
+  dp_sync (a rename in the author's tree we never took). Fix: 2-line rename
+  (signature + super() call) = commit d97883e032. Included in
+  patches/ngram-60615-port.diff (the full fork diff 3d55bcefc3..d97883e032).
+- Launcher: +5 binds (config/vllm.py, spec_decode/{__init__,mtp,ngram,
+  target_dependent_ar}/...). Pre-port fork == image byte-identical on all 5,
+  so the binds carry exactly the port. Default CONFIG ->
+  awq-1m-fp8-ssmbf16-mtp4-ngram.yml (ngram_lookup: true, window 12/16
+  EXPLICIT — our tree's default is 5/5, the PR's tuned 12/16 came in a
+  follow-up revision we don't have; with 5 their gains were smaller).
+- Config gate: V2-only (we are V2), no adaptive verification, no DP — all
+  fine. mtp draft-slot reservation stays 0 (MTP + ngram reserve nothing).
+
+## Gates (all green)
+- Startup: pool 5,282,636 tokens / 5.04x — matcher buffers did NOT eat the
+  pool; 0 errors; 0 [partial-cow]/[hash-promote].
+- QUALITY (user's take condition): copy probe = EXACT echo (normalized len
+  1188 == 1188, head match), RU + code coherent, 4-way concurrent all
+  healthy (batch>1 = stock MTP path by construction), parser canary
+  bare-function stays text, tool_calls=False.
+
+## A/B (solo decode tok/s, 3 reps per class per arm, medians; client timing)
+  class                MTP-4    +ngram    delta
+  echo RU text         181.4    226.2     +24.7%  (ranges do not overlap)
+  file-edit rename     151.5    154.4      +1.9%  (noise)
+  code from scratch    157.9    152.9      -3.2%  (ranges just disjoint)
+  RU reasoning         131.0    127.5      -2.7%  (overlapping = borderline)
+  4-way concurrent     par      par        unchanged (by construction)
+  Acceptance this bounce: 1873/3188 = 58.7%, length 2.35 (mixed probes).
+  First single-run pair had copy +33% / ru +9% — the +9% did not survive
+  reps; the -3% no-match tax is the per-step lookup+flag-sync cost the PR
+  itself prices at ~0.5% on GB10 (our PP3 steps are longer, tax ~3%).
+
+## Why ship despite the mixed profile
+- Echo/document-replay turns (agent quoting files, repeat-this) win big;
+  file-edit agent turns wash (our k=4 MTP already drafts code at 93% —
+  ngram can't beat the 5-token/step ceiling, only skips draft compute);
+  pure reasoning pays ~3%.
+- The user's condition was quality (passed exactly); worst case is small
+  and solo-only; revert = one launcher line (CONFIG back to mtp4.yml) +
+  bounce. Flag off = factory returns plain MTPSpeculator = byte-old path.
+
+## Prod state
+Tag: prod-mtp4-ngram-20261111. Fork dflash2-pool @ d97883e032. Launcher
+default CONFIG = ngram yml. Revert recipe documented in the launcher
+comment line.
