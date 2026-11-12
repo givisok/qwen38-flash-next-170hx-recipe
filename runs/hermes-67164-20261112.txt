@@ -57,3 +57,11 @@ API end-to-end (repeat-exactly, thinking off, tools=[calc]):
 Fork dflash2-pool @ 1a6081e597. Launcher unchanged (parser binds since
 11-06). Revert = git revert 1a6081e597 in the fork + bounce (binds read
 the working tree). Tag: prod-mtp4-ngram-hermes-20261112.
+
+## Post-ship confirmation from the user (same evening)
+The hole was NOT theoretical: the user reports pi sessions in the past
+that would "just stop" — exactly this failure. Model emits a hermes-JSON
+call -> parser swallowed the whole markup -> assistant turn comes back
+EMPTY (no content, no tool_calls) -> the agent has nothing to act on and
+the turn ends. Status upgraded from "risk class" to "confirmed real
+incident". That freeze class is now dead on prod.
