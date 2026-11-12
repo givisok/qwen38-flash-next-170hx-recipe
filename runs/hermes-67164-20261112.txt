@@ -1,0 +1,59 @@
+# 2026-11-12 (evening): vllm#67164 semantics PORTED and DEPLOYED — hermes
+# JSON tool bodies recovered. Fork dflash2-pool @ 1a6081e597 (on top of the
+# ngram prod state d97883e032). Engine files untouched: whole port in
+# vllm/parser/qwen3.py (+72 lines) + battery extension.
+
+## What was broken (proven pre-port, runs/upstream-sweep-20261112.txt)
+A complete hermes-style call  <tool_call>{"name": ...,
+"arguments": ...}</tool_call>  was SILENTLY DROPPED by our qwen3_xml
+parser (0 calls, body swallowed: content=None). 4 hole classes on the CPU
+stand, controls green. Uncensored finetunes drift to this format — real
+pi risk (agent loses an action invisibly).
+
+## The port (upstream #67164 semantics in OUR engine's idiom; their diff
+targets a newer refactored qwen3.py — does not apply to us)
+1. content_events gains TOOL_PREAMBLE -> ARG_VALUE_CHUNK: the JSON body
+   text now reaches the call's args (default dict had no entry -> text
+   dropped in _emit_for_state). Whitespace before the trained <function=
+   is invisible to the XML converter -> trained path unchanged.
+2. _qwen3_arg_converter: JSON branch first (_qwen3_json_body_args): body
+   starts with '{' -> complete body returns the arguments JSON
+   (arguments/parameters key, str-args passthrough, name stripped);
+   incomplete during streaming returns "" (defer to close — no partial
+   garbage deltas, matches _compute_arg_delta's `if not current_json`);
+   not JSON -> None -> XML fallback untouched.
+3. Qwen3Parser._try_extract_name override: args starting '{' parse
+   exactly when complete (top-level name); partial streaming falls back
+   to the base regex ONLY ahead of "arguments"/"parameters" keys — a
+   literal "name" argument nested inside arguments cannot steal the call
+   name (upstream's guard; tools with a name= arg are common).
+
+Recovery machinery already in our base (upstream had to add it):
+_try_extract_name hook points, _extract_name_and_args split,
+_accept_tool_name gating (validate_tool_names covers the new path).
+
+## Gates
+CPU battery (tests/parser/test_parser_canaries.py, prod parser binds,
+real tokenizer, non-stream + 7-char streaming): 12/12 GREEN —
+  old 7 intact (real-call, plain, bare-function, fenced, not-offered,
+  fence-then-real, two-real-calls) + hermes-json-body 1 call, hermes-
+  with-text 1 call, hermes-not-offered 0, hermes-fenced 0 (text kept),
+  hermes-nested-name-key 1 call (arguments-first body).
+Detailed probe (patches/hermes-67164-probe.py): 7/7 — name AND args
+correct: ('calc', '{"x": 1}') for full/parameters-key/str-args/with-text.
+Prod bounce 16:24-16:28 UTC (pi idle 30+ min): startup clean, pool
+5,282,636 tokens / 5.04x UNCHANGED, tripwires [partial-cow]/
+[hash-promote] 0, no errors (one benign max_model_len warning, known).
+API end-to-end (repeat-exactly, thinking off, tools=[calc]):
+  hermes-echo    -> FIRES calc {"x": 1}   (pre-port: content=None)  PASS
+  real-xml       -> fires calc {"x": 3}                                 PASS
+  bare <function -> stays text, no call                                 PASS
+  hermes-not-offered / hermes-fenced via API: the MODEL rewrites its
+  echo under offered tools (emits an unfenced call to the offered name;
+  no-tools echo is verbatim — verified; the parser has no rename logic),
+  so these two are parser-gated at UNIT level (battery) — ground truth.
+
+## Prod state
+Fork dflash2-pool @ 1a6081e597. Launcher unchanged (parser binds since
+11-06). Revert = git revert 1a6081e597 in the fork + bounce (binds read
+the working tree). Tag: prod-mtp4-ngram-hermes-20261112.

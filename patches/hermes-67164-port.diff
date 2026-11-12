@@ -1,0 +1,127 @@
+diff --git a/tests/parser/test_parser_canaries.py b/tests/parser/test_parser_canaries.py
+index 972e21f3b7..b57186c461 100644
+--- a/tests/parser/test_parser_canaries.py
++++ b/tests/parser/test_parser_canaries.py
+@@ -40,6 +40,12 @@ NOT_OFFERED = "<tool_call>\n<function=nukes>\n<parameter=x>3</parameter>\n</func
+ FENCE_THEN_REAL = "Example:\n```\n" + BARE + "\n```\nNow really call it:\n" + REAL
+ TWO = REAL + "\n" + REAL
+ PLAIN = "Обычный текст без разметки, 2+2=4."
++HERMES = '<tool_call>\n{"name": "calc", "arguments": {"x": 1}}\n</tool_call>'
++HERMES_TEXT = 'Сделаю расчёт.\n' + HERMES
++HERMES_NOT_OFFERED = '<tool_call>\n{"name": "nukes", "arguments": {"x": 1}}\n</tool_call>'
++HERMES_FENCED = "Пример:\n```json\n" + HERMES + "\n```\nКонец."
++# arguments first, top-level name last: the nested-"name" guard path
++HERMES_NESTED = '<tool_call>\n{"arguments": {"name": "Иван"}, "name": "calc"}\n</tool_call>'
+ 
+ 
+ def new_parser():
+@@ -87,6 +93,11 @@ CASES = [
+     ("phantom-not-offered-name", NOT_OFFERED, 0, 0),
+     ("fence-then-real-call", FENCE_THEN_REAL, 1, 1),
+     ("two-real-calls", TWO, 2, 2),
++    ("hermes-json-body", HERMES, 1, 1),
++    ("hermes-with-text", HERMES_TEXT, 1, 1),
++    ("hermes-not-offered-name", HERMES_NOT_OFFERED, 0, 0),
++    ("hermes-fenced", HERMES_FENCED, 0, 0),
++    ("hermes-nested-name-key", HERMES_NESTED, 1, 1),
+ ]
+ 
+ fails = 0
+diff --git a/vllm/parser/qwen3.py b/vllm/parser/qwen3.py
+index ed144af709..14afd1734e 100644
+--- a/vllm/parser/qwen3.py
++++ b/vllm/parser/qwen3.py
+@@ -66,7 +66,40 @@ def _trim_wrapping_newlines(value: str) -> str:
+     return value
+ 
+ 
++def _qwen3_json_body_args(raw_args: str, partial: bool) -> str | None:
++    """Arguments JSON from a hermes-style JSON tool body, if the body is one.
++
++    Qwen3 base models (and finetunes drifted off the trained format) emit
++    ``{"name": ..., "arguments": ...}`` directly inside ``<tool_call>``
++    instead of the XML parameter form. Returns None when the body is not
++    JSON, so the caller falls back to XML parameter parsing. An incomplete
++    JSON body during streaming yields "", deferring the arguments to the
++    tool-call close (upstream #67164 semantics).
++    """
++    stripped = raw_args.strip()
++    if not stripped.startswith("{"):
++        return None
++    if partial and not stripped.endswith("}"):
++        # Incomplete JSON: defer without reparsing the growing body.
++        return ""
++    try:
++        parsed = json.loads(stripped)
++    except json.JSONDecodeError:
++        return "" if partial else None
++    if not isinstance(parsed, dict):
++        return "" if partial else None
++    args = parsed.get("arguments", parsed.get("parameters"))
++    if args is None:
++        args = {k: v for k, v in parsed.items() if k != "name"}
++    if isinstance(args, str):
++        return args
++    return json.dumps(args, ensure_ascii=False)
++
++
+ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
++    json_args = _qwen3_json_body_args(raw_args, partial)
++    if json_args is not None:
++        return json_args
+     params: dict[str, object] = {}
+ 
+     for match in _PARAM_RE.finditer(raw_args):
+@@ -195,6 +228,18 @@ def qwen3_config(
+                 (EventType.TOOL_CALL_START,),
+             ),
+         },
++        content_events={
++            ParserState.CONTENT: EventType.TEXT_CHUNK,
++            ParserState.REASONING: EventType.REASONING_CHUNK,
++            ParserState.TOOL_NAME: EventType.TOOL_NAME,
++            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
++            # A hermes-style JSON body sits directly in <tool_call> with no
++            # <function= wrapper; capture the preamble as raw args so the
++            # name/arguments can be recovered from the JSON (upstream
++            # #67164). Whitespace before the trained <function= form is
++            # invisible to the XML converter, so that path is unchanged.
++            ParserState.TOOL_PREAMBLE: EventType.ARG_VALUE_CHUNK,
++        },
+         # A quoted or fenced tool-call example must not become a real
+         # call: require the <tool_call> wrapper, keep markup inside ```
+         # fences as text, and drop calls whose names are not among the
+@@ -253,6 +298,33 @@ class Qwen3Parser(ParserEngine):
+             **kwargs,
+         )
+ 
++    def _try_extract_name(self, idx: int) -> str | None:
++        raw = self._tool_slots[idx].args
++        if not raw.lstrip().startswith("{"):
++            return super()._try_extract_name(idx)
++        # JSON body: the base regex could match a "name" field nested
++        # inside a leading "arguments"/"parameters" object (tools with a
++        # literal name argument), so only trust it ahead of those keys;
++        # the complete body parses exactly (upstream #67164).
++        try:
++            parsed = json.loads(raw.strip())
++        except json.JSONDecodeError:
++            parsed = None
++        if isinstance(parsed, dict):
++            name = parsed.get("name")
++            return name if isinstance(name, str) and name else None
++        match = self._NAME_RE.search(raw)
++        if not match:
++            return None
++        key_positions = [
++            pos
++            for key in ('"arguments"', '"parameters"')
++            if (pos := raw.find(key)) != -1
++        ]
++        if key_positions and match.start() > min(key_positions):
++            return None
++        return match.group(1)
++
+     def extract_reasoning(
+         self,
+         model_output: str,
