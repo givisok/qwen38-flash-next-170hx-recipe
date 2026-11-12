@@ -1,0 +1,90 @@
+# Sweep 2026-11-12 (24h delta since the 11-11 sweep; /tmp scripts were wiped,
+# sweep rebuilt). Upstream window: 148 commits, 100 new PRs, scanned by
+# keyword + full tracked list. Peers: all 5 quiet; 1CatAI burst continues
+# (SM70 V100 lane, not portable). ONE actionable find: the hermes-JSON
+# tool-body hole — PROVEN on our prod parser this evening (see below).
+
+## The find: vllm#67164 (opened 11-12, fixes #67157) — hermes JSON in <tool_call>
+Qwen3 base models (and finetunes that drift off the trained format — our
+leoncca uncensored is in that risk class) may emit a COMPLETE tool call as
+  <tool_call>{"name": "calc", "arguments": {"x": 1}}</tool_call>
+instead of the trained XML parameter form. Upstream symptom: the qwen3_xml
+parser silently DROPS it — content=None, no tool calls. The action dies
+invisibly (an agent believes it called a tool; nothing happened).
+
+PROVEN ON OUR STACK (CPU stand, prod parser binds over the image, real
+tokenizer, thinking-off lane; probe = CT /root/qwen38fn/tools/hermes_repro.py,
+same harness style as the 11-06 canary battery):
+  case                      result
+  real-xml-call             PASS 1 call (calc, {"x": 1})        [control]
+  hermes-full               HOLE: 0 calls, content EMPTY
+  hermes parameters-key     HOLE: 0 calls, content EMPTY
+  hermes + surrounding RU   HOLE: call lost (text survives)
+  hermes arguments-as-str   HOLE: 0 calls
+  hermes not-offered name   PASS 0 calls (name gate holds)      [control]
+  hermes fenced ```json     PASS 0 calls, text preserved        [control]
+Streaming (7-char chunks) = same holes as non-streaming.
+
+Root cause in OUR engine (vllm/parser/engine/streaming_parser_engine.py
+_emit_for_state): plain text in ParserState.TOOL_PREAMBLE is emitted per
+config.content_events, and qwen3_config's default dict has NO entry for
+TOOL_PREAMBLE -> the JSON body text is dropped before any recovery can
+see it. Our 11-06 hardening closed phantom calls but this is the inverse
+failure: a REAL call dropped.
+
+## Why the port is SMALL on our base
+Our base already carries the whole recovery machinery upstream had to add:
+- parser_engine.py:1086 _try_extract_name — regex name from accumulated
+  args, invoked at both _handle_arg_chunk (streaming, name-not-yet-sent)
+  and _handle_tool_end (close);
+- _build_extracted_result: name empty + args = full JSON body ->
+  _extract_name_and_args {"name","arguments"/"parameters"} split,
+  then _accept_tool_name gate (validate_tool_names covers the new path);
+- _extract_args_value handles str-arguments and parameters-key variants.
+Missing pieces (the whole port, both in vllm/parser/qwen3.py):
+1. content_events with TOOL_PREAMBLE -> ARG_VALUE_CHUNK (must pass the
+   full dict — the ctor arg replaces the default);
+2. _qwen3_arg_converter JSON branch (upstream _qwen3_json_body_args:
+   body starts with '{' -> complete: arguments json; partial during
+   streaming: "" defer; not JSON -> None -> XML fallback) so
+   _flush_arg_converter produces correct final args for the hermes path.
+Upstream's diff (68 lines in qwen3.py) targets their newer refactored file
+(_qwen3_parse_params/_ClosedParams/content_events ctor arg/class-level
+_try_extract_name) — does NOT apply to ours; re-implement in our idiom.
+Risk watch for the port: preamble whitespace now joins slot.args in the
+TRAINED path (converter is whitespace-tolerant, but battery must confirm
+real-xml/two-calls/fence-then-real stay green, and streaming arg deltas
+stay sane); hermes-not-offered + hermes-fenced must stay 0.
+
+## Rest of the window — closures, nothing to take
+- #66552 [Perf][DSv4.1] Engram 128-row lookup tiles + split GPU tables —
+  all 7 files under models/deepseek_v41/: that Engram is DeepSeek's own
+  n-gram LM-head engine, NOT our Qwen4Exp PLE (our ngram_embedding.py /
+  PLE staged gather is a different subsystem). CLOSED: not our code path.
+  The 128-row-tile IDEA stays a shelf note only if PLE gather ever shows
+  in profiles (it doesn't: steps are GEMM-bound, gather ~21MB/chunk).
+- #67132 MultiModuleMTPSpeculator cache reset on slot admission — the
+  multi-module MTP class is newer than our base; our single-module MTP
+  (NgramMTPSpeculator/MTPSpeculator) has no per-slot draft cache; 0 prod
+  symptoms. Not our class; rebase note only. (PR itself admits kernels
+  not executed / CI not run — early.)
+- #67200 hermes fix for the RUST frontend — we run the python API server;
+  the qwen3.py engine fix (#67164) is the one that reaches us.
+- #67245 log resolved speculative config — we already log it. Skip.
+- #67153 fast detokenizer seeded with prompt tail — frontend host cost on
+  huge prompts; no measured pain for us; rebase freebie.
+- #67236/#67238/#67223 (sparse LM head quant/scatter) + #67219 — DSv4.1
+  Engram LM-head lane, not our head. #67246 FlashInfer FP8 KV = Hopper.
+- Extensible-KV-cache sizing series (#66523/#66731/#67228...) — we run a
+  classic pre-sized pool; not our lane.
+- Tracked: trigger pair #61779/#61952 last touch 11-11T08:42 (the rebase
+  push already recorded; no new movement). #66040/#66318 ReplaySSM wave
+  still open (+#67198 Mamba2 SSD dispatch opened 11-12 — wave continues,
+  rebase stays on hold). #62344 still BF16-gated. #60615 still open/
+  untouched since 10-16 (our port stands). #66169/#66176/#66341/#64205/
+  #50986/#57553 unchanged.
+
+## Verdict
+One candidate: port #67164 semantics into vllm/parser/qwen3.py (2 hunks +
+battery extension; engine files untouched). Awaiting user go; prod state
+unchanged (prod-mtp4-ngram-20261111), no tag.
