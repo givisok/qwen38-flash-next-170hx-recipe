@@ -88,3 +88,27 @@ stay sane); hermes-not-offered + hermes-fenced must stay 0.
 One candidate: port #67164 semantics into vllm/parser/qwen3.py (2 hunks +
 battery extension; engine files untouched). Awaiting user go; prod state
 unchanged (prod-mtp4-ngram-20261111), no tag.
+
+## Post-sweep follow-up (user-flagged): commit 5c1eb11cb = PR #60234
+"[Bugfix] Allow pipeline parallelism for Qwen4Exp PLE models and their
+MTP drafter" (merged 10-27, AFTER our base forked ~10-22). Verdict:
+ALREADY SOLVED OURSELVES in October — same disease, our own surgery:
+1. config.py PP>1 gate: our patch `if False:`s it, with PLE gated to the
+   FIRST PP rank in model_state (upstream instead deleted the guard).
+2. lm_head -> PPMissingLayer on non-last ranks: ours since the pp-head
+   patch (model.py:808).
+3. model_state.py PP guard: removed by our first-rank PLE gating.
+4. mtp.py drafter branch: ours is `if is_first_rank or intermediate_tensors
+   is None:` (mtp.py:371) — a SUPERSET of upstream's fix (they switched
+   is_first_rank -> intermediate_tensors is None); prod-proven.
+5. kv_cache_planning.py refactor: not our path (not bound, pool sizing
+   correct on our base).
+The ONE thing theirs has that ours lacks: embed_tokens as PPMissingLayer
+on non-first ranks (ours builds VocabParallelEmbedding on ALL ranks —
+248320 x 2560 x 2B = 1.27 GiB wasted per non-first card). GPU2 (last
+stage = binding rank for the pool, 62.9/65.5 GiB used vs ~5.9 free on
+GPU0/1) carries that waste, so the PPMissingLayer version would grow the
+pool by roughly +2% (5.04x -> ~5.1x). NOT worth prod surgery today: pool
+size is not our pain (16-seq geometry, real traffic far from the cap),
+and the loader touch is risk for nothing. FREE at the base-jump rebase
+(the commit is upstream); noted in the rebase scope.
