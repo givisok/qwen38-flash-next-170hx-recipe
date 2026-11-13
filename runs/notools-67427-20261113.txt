@@ -1,0 +1,48 @@
+# 2026-11-13: vllm#67427 semantics PORTED and DEPLOYED — no-tools requests
+# keep tool-call markup as text. Fork dflash2-pool @ f010ce5415 (on top of
+# the hermes port 1a6081e597). Whole port = 2 guards (+17 lines) in
+# vllm/parser/abstract_parser.py + 1 launcher bind. Engine parser untouched.
+
+## What was broken (proven pre-port, runs/upstream-sweep-20261113.txt)
+A request WITHOUT tools still has tool_choice default "none";
+DelegatingParser._extract_tool_calls ran the engine parser anyway -> markup
+consumed into tool_calls, content=None -> response builder dropped the calls
+(request declared no tools) -> client got content=null, finish=stop, tokens
+burned, NOTHING logged. Probe (engine parser driven directly, no tools):
+real-xml/hermes call = TOTAL LOSS; markup quoted inside text = example
+silently torn out. With no tools offered our name gate accepts ANY name, so
+the swallow was unconditional. Plausibly the other half of the historical
+"pi just stops" sessions (analysis turns without tools).
+
+## The port (upstream #67427, same shape — our anchors matched theirs)
+1. _extract_tool_calls: `if not request.tools: return [], content` before
+   the tool_choice=="none" branch.
+2. _extract_tool_calls_streaming: same guard, returns the raw delta as
+   content.
+Scope is deliberately narrow: tool_choice="none" WITH tools declared is
+untouched (upstream semantics question #55080/#55089). Reasoning extraction
+untouched (content arrives reasoning-stripped).
+Bind: launcher +1 line (abstract_parser.py); image file was byte-identical
+to the fork pre-patch (md5 063899d7f297...) -> bind = clean overlay.
+
+## Gates
+Serving-path CPU probe (patches/notools-67427-probe.py; drives the REAL
+ParserManager-composed DelegatingParser, non-stream + 7-char streaming):
+5/5 GREEN — no-tools real-xml/hermes/quoted keep markup in content both
+lanes; WITH tools real-xml and hermes still fire 'calc'.
+(Probe trap: parse() needs enable_auto_tools=True — the API passes it;
+without the flag the auto branch never runs and with-tools non-stream
+shows no calls. First run's 2 FAILs were this artifact, not the port.)
+Prod bounce 10:01-10:06 UTC (pi quiet 6+ min after a 33-req half hour):
+startup clean, pool 5,282,636 / 5.04x UNCHANGED, tripwires
+[partial-cow]/[hash-promote]/Traceback 0.
+API end-to-end (repeat-exactly, thinking off):
+  no-tools real-xml  -> content CONTAINS the markup (pre-port: null)  PASS
+  no-tools hermes    -> content contains it                            PASS
+  tools real-xml     -> call calc fires                               PASS
+  tools hermes       -> call calc fires (yesterday's port intact)     PASS
+
+## Prod state
+Fork dflash2-pool @ f010ce5415. Launcher default CONFIG unchanged (ngram
+yml). Revert = git revert f010ce5415 + remove the abstract_parser bind +
+bounce. Tag: prod-mtp4-ngram-hermes-notools-20261113.
