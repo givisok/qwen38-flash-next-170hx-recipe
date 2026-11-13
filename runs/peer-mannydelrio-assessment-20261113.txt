@@ -1,0 +1,57 @@
+# 2026-11-13: peer assessment — mannydelrio/qwen38-flash-next-2x-cmp170hx
+# (user-flagged). Recipe repo, NOT a vllm fork: 3 commits, 10-06..10-16,
+# 4 stars. Their rig: 2x CMP 170HX 8GB-variant unlocked to 64GB, 16 GB host
+# RAM (!), PCIe Gen2 x4, PP2 (VLLM_PP_LAYER_PARTITION=25,23), MTP-3, native
+# 262K ctx, max-num-seqs 8, graphs to 32, chunk 4096, gmu 0.94. SAME
+# checkpoint (leoncca uncensored AWQ-g32 @ fa56146). Base: wtdcode/
+# vllm-backport @ 3142ded1 + patch (clee PP KV fix + vLLM #57105).
+# Headline: PLE table (29.8 GB) served from NVMe SSD + INT4 PLE quant
+# plugins; 4-5.7x vs their stock-TP starting point; 986 tok/s total at 8
+# slots (structured). VERDICT: nothing to take for prod; 2 shelf notes +
+# 1 operational data point. Details below.
+
+## Item-by-item
+1. VLLM_DETERMINISTIC_MOE_ALIGN=0 ("+17% answers, same quality"):
+   the env does NOT exist in our fork (grep: zero hits) — our older base
+   predates the deterministic MoE align entirely, so we already run the
+   fast nondeterministic path. Their 17% = reverting a determinism default
+   their newer base carries. CLOSED: nothing to gain; becomes relevant
+   only as a rebase-day check (if the base-jump lands the deterministic
+   default, set =0 to keep today's behavior).
+2. vLLM #57105 (QSA indexer worst-case logits workspace, anti-frag):
+   merged 09-27 — BEFORE our base; our qsa_indexer.py:676 literally has
+   the "always allocate the worst case to avoid memory fragmentation"
+   reserve. ALREADY OURS via clee dev253. (The OTHER workspace, line 598
+   per-call decode logits empty, is the #66148 class we closed 11-10 as
+   geometry-safe with our 16-seq cap.)
+3. SSD PLE reader (plugins/tinybeast-ple-ssd, CPU prefetch, TB_PLE_SSD_*):
+   their README credits it — "adapted from clee/vllm-sm80's ple_preadv.py"
+   — i.e. the SAME lineage our fork runs and binds today (ple_preadv.py in
+   the launcher). ALREADY OURS. Their CPU-side row-id prefetch overlap is
+   the same trick our ple-prefill-checkpoints path implements.
+4. INT4 PLE quant (plugins/tinybeast-ple-int4): halves the table vs our
+   FP8 PLE (theirs from 29.8GB bf16). Quality claim: HumanEval 155/164 —
+   tolerable. SHELF ONLY: we are not VRAM-constrained (pool 5.04x, PLE on
+   host RAM). Becomes interesting only if a future lane needs the memory
+   (EXL3, bigger capture sets, denser draft). Must stay leoncca-derived
+   if ever converted (same constraint as all bench artifacts).
+5. YaRN >262K tried and DROPPED by them: works functionally to 524K but
+   shifts outputs at every length (KL 0.019 vs 0.011 run-to-run floor);
+   their bots never used >191K. Confirmatory data point for our YaRN 4x
+   1M override: we accepted the drift + fixed precision our way
+   (qwen4-precision.diff). No action.
+6. Power curve (their cards): 180W sweet spot — 220W/250W buy only
+   +5.6%/+8.4% long-prompt speed for +19%/+36% power. WE run at the
+   250W limit (verified live) — i.e. the performance side; prefill-heavy
+   storms benefit. OPERATIONAL OPTION for the user: dropping to ~180W
+   saves ~210 W total at the cost of ~8% long-prefill speed. No change
+   made.
+7. Their tooling: tf_compare.py teacher-forced quality A/B (logit-level
+   config compare) and the MiaAI-Lab cross-recipe protocol_speed method —
+   methodological nice-to-haves; our own gates/batteries cover the same
+   needs. No port.
+
+## Outcome
+Prod unchanged (prod-mtp4-ngram-hermes-notools-20261113, fork
+dflash2-pool @ f010ce5415). Repo added to the recipe-repo watch list
+(2x 8GB-variant lane; stale since 10-16). Nothing ported.
