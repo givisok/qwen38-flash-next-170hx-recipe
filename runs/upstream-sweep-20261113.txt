@@ -1,0 +1,68 @@
+# Sweep 2026-11-13 (24h delta). Upstream: 145 commits, ~100 new PRs. Peers:
+# all 5 quiet; 1CatAI merged 5 (SM70/MRV2 warmup lane — watch only). ONE
+# actionable find, same parser lane as yesterday: vllm#67427 — no-tools
+# requests lose generated text. PROVEN on our stack (CPU stand).
+
+## The find: vllm#67427 (opened 11-13, fixes #67425) — no-tools content loss
+Chain (their writeup, matches our base): a request WITHOUT tools still has
+tool_choice default "none" -> DelegatingParser._extract_tool_calls takes the
+"none" branch but STILL runs the engine parser -> markup consumed into
+tool_calls, content becomes None -> response builder drops the calls
+(request declared no tools) -> client gets content=null, finish=stop,
+tokens burned, NOTHING logged. Same silent-loss class as the hermes bug;
+plausibly the other half of the historical "pi just stops" sessions
+(analysis turns without tools).
+
+PROVEN on our stack (CT /root/qwen38fn/tools/notools_probe.py, CPU stand,
+prod parser binds, engine parser driven directly, request tools=None):
+  case             parser result                     client-visible
+  real-xml call    content=None, call 'calc'          TOTAL LOSS (call dropped)
+  hermes call      content=None, call 'calc'          TOTAL LOSS
+  markup-in-text   surrounding text kept, markup torn PARTIAL LOSS (example
+                   out + call dropped                 silently deleted)
+With no tools offered our name gate accepts ANY name (by design
+_is_valid_tool_name: no tools -> True) — the swallow is unconditional.
+
+Their fix (vllm/parser/abstract_parser.py, 2 x ~6-line hunks):
+non-stream `if not request.tools: return [], content` before the
+tool_choice=="none" branch; streaming same shape (return the raw delta as
+content). Reasoning extraction is NOT affected (content arrives
+reasoning-stripped). Narrow scope: does not touch tool_choice="none" WITH
+tools declared (separate semantics question #55080/#55089).
+Our anchors verified: _extract_tool_calls @382-393,
+_extract_tool_calls_streaming @684-703 — same shape as upstream pre-fix.
+Port = 2 hunks + 1 NEW launcher bind (abstract_parser.py not bound yet)
++ battery extension. Revert = remove the bind.
+
+## Rest of the window — verdicts
+- #66318 [Mamba2 ReplaySSM Triton] MERGED 11-12: the ReplaySSM wave takes
+  another settle step. Series now: #55688/#61501/#66318 in; #66040 + #67198
+  still open/moving. Base-jump rebase stays on hold (yesterday's verdict).
+- #66063 [Spec Decode][PP] draft models as a single pipeline stage — MERGED
+  11-12. NOT ours: "Drafters that already worked under PP (Qwen4Exp MTP...)
+  retain their behavior"; it fixes drafters that FAILED under PP (Qwen3-Next
+  MTP, EAGLE-1, standalone). Rebase-conflict note only (pp_utils/model_runner).
+- #67356 spec-decode draft padding -1 into input_ids under async scheduling
+  -> embedding gather device assert, engine dies. OUR config lane (async+MTP+
+  graphs), but their trigger = concurrency-32/48 saturation bursts +
+  multimodal; we cap at 16 seqs, no MM, months of prod with zero fires.
+  WATCH: if it merges and survives review, port the one-line kernel guard at
+  the next idle window; not urgent.
+- #66784 merged-linear padding for Qwen4Exp loader — we load fine; rebase
+  freebie. #61452 KV-cache allocation policy move (RFC part 2) — rebase-pain
+  predictor for our cache patches, not a port. #66063/#64531/#67005 MRV2
+  spec/PP lanes — rebase notes.
+- #67349 extends embed/lm_head PPMissingLayer to Qwen3-MoE/Next/3.5/gpt-oss
+  (Qwen4Exp already got it via #60234 — our noted +2% pool delta rides the
+  rebase). #67421 Qwen3.8 specialized decode on MI355X = ROCm-gated.
+- #67442 per-request prefix-cache miss attribution — observability, nice,
+  no pain. #67373/#67374 persistent-state streams — new subsystem, not ours.
+- Tracked: #67164/#67200 (hermes) still open, no motion — our port stands.
+  Trigger pair #61779/#61952, #62344 (BF16-gated), #60615, #66169/#66176/
+  #66341/#64205/#50986/#57553 — unchanged. v0.33.0 still rc3 (11-02), no
+  final.
+
+## Verdict
+One candidate: port #67427 semantics (no-tools guard) — small, our lane,
+proven hole, same silent-loss class as the hermes bug. Awaiting user go.
+Prod unchanged (prod-mtp4-ngram-hermes-20261112); no tag.
