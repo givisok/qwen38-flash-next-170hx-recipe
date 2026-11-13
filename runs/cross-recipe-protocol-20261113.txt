@@ -1,0 +1,38 @@
+# 2026-11-13: cross-recipe protocol battery (MiaAI-Lab / mannydelrio method)
+# run on OUR prod, pi idle, their script verbatim (thinking off, temp 0,
+# 400-token cap, streaming; solo = (tok-1)/(end-first) median of 10;
+# multi = toks/wall median of 3; prefill cold via uuid salt).
+# vs mannydelrio's published numbers (2x CMP170HX PP2, MTP-3, 262K, chunk
+# 4096). Raw: /tmp/protocol_ours.json (laptop).
+
+## Decode, median tok/s (ours vs theirs)
+  class        1u          2u            4u            8u
+  structured  233 vs 193   354 vs 329    502 vs 599    961 vs 986
+  code        197 vs 178   200 vs 243    263 vs 447    337 vs 734
+  prose       152 vs 146   244 vs 234    339 vs 400    632 vs 620
+
+SOLO: WE WIN all three classes (+21% structured, +11% code, +5% prose).
+Cold prefill: ours 3,987 tok/s median vs their ~7,700 (their 4096-chunk
+pure prefill vs our campaign-chosen 864 MIXED chunk — the storm tradeoff).
+
+## Why their multi-user "code" looks 2x ours — measurement artifact
+clamp_range with thinking off EOSes at ~59 tokens: 8 streams = 472 tokens
+total (vs 3200 for structured/prose which hit the 400 cap). At 472 tokens
+the wall is PREFILL-shaped, not decode-shaped: 8 tiny prompts enter our
+864-token mixed scheduler one chunk each (~150 ms/step class) = ~1.2 s of
+the 1.4 s wall. Their 4096-chunk scheduler batches all 8 prefills into one
+~280-token chunk (~40 ms). Not a decode regression: our code SOLO is +11%
+and the 8-user structured/prose (true decode-bound classes) are at parity
+with 2 FEWER pipeline hops' worth of cards doing more work per stage.
+
+## Reading
+Their TL;DR "4-5.7x / 109-159 tok/s" is vs their own broken stock-TP
+starting point (37 tok/s, host-sync per layer, no P2P). Head-to-head on
+the shared protocol: our solo-agent rig wins the solo lane everywhere —
+which is the lane pi actually runs (1 user, 99% cacheRead, 1M ctx).
+Their lane (8 small bots, native 262K, big prefill chunks) wins burst
+multi-request and cold prefill — different geometry, deliberate tradeoffs
+on both sides (our 864 chunk was the storm-campaign optimum for pi's
+mixed traffic; raising it back was measured WORSE for the storm).
+
+No prod change. No tag.
