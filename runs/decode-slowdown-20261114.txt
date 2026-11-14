@@ -1,0 +1,74 @@
+# 2026-11-14: decode slowdown investigation — 47-48 tok/s solo (vs 130-230
+# healthy) since the host reboots that installed 2 new RAM sticks. Host now
+# 5x16GB (A1,A2 NEW + B1,C1,D1 old; 78 Gi visible). OPEN at write time —
+# clean host reboot did NOT fix; prime suspect = 5-stick RAM config; next
+# step = pull the 2 new sticks and retest.
+
+## Timeline (UTC)
+- Nov 6 18:15 boot (-2): HEALTHY all week; 11-13 protocol solo on this boot:
+  233.4/196.6/152.3 tok/s (structured/code/prose), pi traffic normal.
+- Nov 14 12:48 boot (-1, 9 min): user's first power-up after RAM install.
+- Nov 14 13:10 boot (0): CT auto-start 13:09:53; first speed measurement
+  13:31 (W1 battery): 47.2-48.0 tok/s — ALL measurements since = 47-49.
+- 13:33 clean launcher bounce + persistence on: no change (44.6-48.6).
+- 14:46 host reboot (user-approved bisect): no change (RB1-RB3 44.6-48.1).
+
+## What it is NOT (all tested on live prod)
+- Software: fork tree clean @ f010ce5415 on dflash2-pool; pool 5,282,636/5.04x
+  byte-exact; boot config identical (mtp-fp8, num_spec 4, ngram 12/16, W4A16
+  head, captures [1..80]); clean bounce reproduced slowness.
+- Storage/cache: drop_caches cold == fully-cat-warm IDENTICAL (44.7-48.5).
+  Microbench per 160B PLE row: warm cache 1.6 us, cold NVMe 118 us (x73);
+  engine insensitive to which today. prefill 27k = 4431 t/s (top band).
+- GPU: SM 1455-1470 / mem 1728 MHz UNDER LOAD, no throttle reasons, power
+  90-123 W of 250, BAR1 32768 MiB on all 3, persistence re-enabled (was off
+  after reboot — no effect).
+- Kernel: no MCE/EDAC/AER events; "Booter failed 0x31" x122 on 0a:00.0 =
+  ancient GT 520 display card, PRESENT in the healthy boot too (chronic).
+- CPU: governor performance, futex ping-pong 7-9 us (host and CT), C-states
+  shallow (max C6 133us), PSI memory 0.00, zero new direct-reclaim during
+  decode (pgscan_direct frozen).
+- Delivery path: ruled out — generation_tokens_total rises in lockstep with
+  client chunks (~117/s incl. draft churn); engine log "Avg generation 134
+  tok/s" counts draft+verify tokens, not client tokens.
+- CT memory limit: tested 64 GiB and back to 36000 (yesterday's value) +
+  fresh cache — identical. The 64 GiB change exonerated.
+- Acceptance: healthy 2.44/draft (per-pos 0.75/0.56/0.35/0.20).
+
+## What the profiles say (py-spy speedscope, 100-200 Hz)
+- EngineCore MainThread: Condition.wait 44% + sched_yield 15% + MessageQueue
+  read-timeout 8% + acquire_read 6% + memory_fence 5%; _process_engine_step
+  only 7%. => step master mostly WAITS.
+- Worker PP0 MainThread: Poller.poll (shm broadcast wait) 75%;
+  _ple_stage_rows 3%. => rank idles waiting for the next step.
+- Worker PP2: Poller.poll 39% + recv 14% + Event.synchronize 7%; real work
+  (QSAMetadataBuilder 3%, CudaLauncher 2%).
+- APIServer: asyncio loop 96% in selector wait => idle, not the bottleneck.
+- Shape: everyone waits; ~73 ms/step (47 tok/s at 3.5 emitted/step) vs
+  ~20-27 ms healthy. N=6 aggregate 361 (healthy 375-402) — per-step fixed
+  cost partially hidden by batch, solo killed (3x).
+
+## Host RAM bandwidth probe (engine running, spin-loops competing)
+- Single dd tmpfs read: 6.5 GB/s; 4 parallel: 19.6 GB/s aggregate — low for
+  quad-channel Broadwell (expect 35-50+), mild support for degraded memory
+  interleave; NO baseline from healthy state (measurement didn't exist).
+
+## Current prime suspect
+5-stick population (A1+A2 added). Mechanism unclear (latency µbenches are
+fast), but bisect eliminated everything else. NEXT: pull A1+A2 -> retest on
+the exact yesterday config (3x16 B1/C1/D1); if healthy again, re-add ONE
+stick in A1 (quad 64 GB) and retest to isolate stick vs slot.
+
+## Ops notes / traps collected
+- Battery needs "chat_template_kwargs": {"enable_thinking": false} — the
+  template flag is ENABLE_THINKING; plain "thinking" is silently ignored
+  (reasoning streams in delta.reasoning, content stays empty => probe crash
+  on None first-timestamp).
+- Container engine log "Avg generation throughput" counts draft+verify
+  tokens (~2.8x client tokens at acc 2.4) — do not compare to client tok/s.
+- py-spy needs absolute path /usr/local/bin/py-spy inside CT bash -c.
+- Host cgroup path only from host (/sys/fs/cgroup/lxc/101/*); inside CT it
+  reads "max" / path absent.
+- Engine-side baseline tool: tools/ple_ab.py (decode pass / 32k prefill,
+  uuid-salted). bench_conc.py patched: localhost + Bearer env key; needs
+  mkdir /tmp/lmhead_ab first.
