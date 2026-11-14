@@ -1,8 +1,23 @@
-# 2026-11-14: decode slowdown investigation — 47-48 tok/s solo (vs 130-230
-# healthy) since the host reboots that installed 2 new RAM sticks. Host now
-# 5x16GB (A1,A2 NEW + B1,C1,D1 old; 78 Gi visible). OPEN at write time —
-# clean host reboot did NOT fix; prime suspect = 5-stick RAM config; next
-# step = pull the 2 new sticks and retest.
+# 2026-11-14: decode slowdown investigation — RESOLVED SAME DAY: MEASUREMENT
+# ARTIFACT, NO REGRESSION EVER EXISTED. The battery counted SSE content
+# CHUNKS as tokens; on RU text the incremental detokenizer coalesces
+# 2.3-3.8 tokens per chunk. "47-48 tok/s" = 47-48 CHUNKS/s = 110-182 real
+# tok/s (usage-based battery: struct 159-163, code 175-182, prose 110-115 —
+# healthy band, matches live pi 100-140 and the 11-13 protocol). The engine
+# log's "Avg generation 134 tok/s" was the true output rate all along
+# (generation_tokens_total counts emitted tokens; my "draft churn"
+# explanation was wrong). "73 ms/step" arithmetic wrong: real ~29 ms.
+# "Everyone waits" py-spy profile = normal PP3 pipeline idle at low batch.
+# The requested host reboot and the 5-stick RAM suspicion were UNNECESSARY
+# (user's pi speed report exposed the artifact). What stays TRUE from the
+# day: PLE row microbench (warm 1.6 us vs NVMe 118 us, x73), PCIe x4
+# chronic, enable_thinking flag trap, persistence resets on host reboot,
+# RAM bandwidth probe 19.6 GB/s 4-par (no baseline, engine competing —
+# treat as noise), and the master trap: NEVER measure stream speed by SSE
+# chunk count — use stream_options include_usage + completion_tokens.
+# Original task completed at the end: CT back to 64 GiB, PLE fully warmed
+# (file 57.2 GiB), final battery 162/174/120 tok/s + prefill 4501 top band.
+# ---- original investigation log follows (kept for the record) ----
 
 ## Timeline (UTC)
 - Nov 6 18:15 boot (-2): HEALTHY all week; 11-13 protocol solo on this boot:
