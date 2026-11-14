@@ -1,0 +1,174 @@
+{
+  "analysis": {
+    "fb_gib": 80,
+    "nvlink_ok": true,
+    "pcie_gen4_ok": true,
+    "sm_count": 110,
+    "sm_per_gpc": [
+      16,
+      16,
+      16,
+      16,
+      16,
+      0,
+      16,
+      14
+    ],
+    "usable_fbp": 10
+  },
+  "burn": [
+    {
+      "block": 5,
+      "chain": 1,
+      "fields": [
+        "fbio_disable"
+      ],
+      "new": "0x8000",
+      "old": "0x0000",
+      "record": "0x80000141",
+      "row": 222
+    },
+    {
+      "block": 6,
+      "chain": 1,
+      "fields": [
+        "fbio_disable",
+        "fbpa_disable"
+      ],
+      "new": "0x0601",
+      "old": "0x0000",
+      "record": "0x06010181",
+      "row": 223
+    },
+    {
+      "block": 7,
+      "chain": 1,
+      "fields": [
+        "fbpa_disable"
+      ],
+      "new": "0x0180",
+      "old": "0x0000",
+      "record": "0x018001c1",
+      "row": 224
+    },
+    {
+      "block": 8,
+      "chain": 1,
+      "fields": [
+        "fbpa_disable",
+        "gpc_disable"
+      ],
+      "new": "0x0106",
+      "old": "0x0000",
+      "record": "0x01060201",
+      "row": 225
+    },
+    {
+      "block": 14,
+      "chain": 1,
+      "fields": [
+        "tpc_gpc5_disable"
+      ],
+      "new": "0x07f8",
+      "old": "0x0000",
+      "record": "0x07f80381",
+      "row": 226
+    },
+    {
+      "block": 15,
+      "chain": 1,
+      "fields": [
+        "tpc_gpc7_disable",
+        "pes_disable"
+      ],
+      "new": "0x0200",
+      "old": "0x0000",
+      "record": "0x020003c1",
+      "row": 227
+    },
+    {
+      "block": 16,
+      "chain": 1,
+      "fields": [
+        "pes_disable"
+      ],
+      "new": "0x1c00",
+      "old": "0x0000",
+      "record": "0x1c000401",
+      "row": 228
+    },
+    {
+      "block": 19,
+      "chain": 1,
+      "fields": [
+        "fbp_disable",
+        "rop_l2_disable"
+      ],
+      "new": "0x4200",
+      "old": "0x0000",
+      "record": "0x420004c1",
+      "row": 229
+    },
+    {
+      "block": 20,
+      "chain": 1,
+      "fields": [
+        "rop_l2_disable"
+      ],
+      "new": "0x1800",
+      "old": "0x0000",
+      "record": "0x18000501",
+      "row": 230
+    },
+    {
+      "block": 21,
+      "chain": 1,
+      "fields": [
+        "rop_l2_disable"
+      ],
+      "new": "0x0060",
+      "old": "0x0000",
+      "record": "0x00600541",
+      "row": 231
+    },
+    {
+      "block": 23,
+      "chain": 1,
+      "fields": [
+        "sys_pipe_disable"
+      ],
+      "new": "0x0800",
+      "old": "0x0000",
+      "record": "0x080005c1",
+      "row": 232
+    }
+  ],
+  "fingerprint": "5d55da2331f339a0",
+  "sku": "8gb",
+  "source": "ffprobe.ko@0xfa000000",
+  "targets": {
+    "disable_gen3_speed_bit1": "0x0",
+    "disable_gen3_speed_bit9": "0x0",
+    "fbio_disable": "0xc03000",
+    "fbp_disable": "0x840",
+    "fbpa_disable": "0xc03000",
+    "gpc_disable": "0x20",
+    "nvlink_disable": "0x0",
+    "pcie_boot_gen23_dis": "0x0",
+    "pcie_boot_gen3_dis": "0x0",
+    "pcie_magic_gen4_dis": "0x0",
+    "pes_disable": "0x38000",
+    "rop_l2_disable": "0xc03000",
+    "sys_pipe_disable": "0x80",
+    "tpc_gpc0_disable": "0x0",
+    "tpc_gpc1_disable": "0x0",
+    "tpc_gpc2_disable": "0x0",
+    "tpc_gpc3_disable": "0x0",
+    "tpc_gpc4_disable": "0x0",
+    "tpc_gpc5_disable": "0xff",
+    "tpc_gpc6_disable": "0x0",
+    "tpc_gpc7_disable": "0x40"
+  },
+  "uuid": "GPU-ec614963-2847-55eb-ac42-c52c10be76be",
+  "warnings": []
+}
