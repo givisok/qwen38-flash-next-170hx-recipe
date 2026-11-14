@@ -1,0 +1,38 @@
+# 2026-11-14: host RAM 48->80 GB — CT 101 raised 36->64 GiB (hot), PLE fully
+# resident in page cache. User installed 2 more 16GB RDIMMs.
+
+## Facts before
+- Host modules: 5x 16GB RDIMM @2133 (A1, A2, B1, C1, D1) = 80 GB phys,
+  78 Gi visible. Previously 3x16 (48GB) since 10-28.
+- CT 101 memory cap: 36000 MiB. Cgroup AT the ceiling:
+  memory.current 37.4 GB = anon 10.4 + file 26.1 (of 37.75 GB limit).
+- PLE table (the thing the cap throttles): 33 files
+  official-fp8-ple-model-00005..00037-of-00131.safetensors
+  = 2x763M + 31x1.5G = 48.0 GiB exact. Coverage at 36 GiB cap ~54%
+  of table in cache (26.1 GiB file incl. non-PLE pages).
+
+## Change (no restart, LXC hot)
+- pct set 101 --memory 65536  (64 GiB)
+- verified host-side: /sys/fs/cgroup/lxc/101/memory.max = 68719476736.
+  NOTE: inside the CT /sys/fs/cgroup/memory.max reads "max" — PVE holds
+  the limit at the outer level; check from the HOST, not inside.
+- Sizing: PLE 48.0 + anon 10.4 = 58.4 -> 64 gives ~5-6 GiB churn room;
+  host worst case CT 64 + host-other ~7.6 = ~72 of 78 Gi + 8 GB swap.
+
+## Warm (traffic was 0/0 running/waiting)
+- cat of all 33 PLE files > /dev/null inside CT: 25.0 s (~2 GB/s NVMe).
+- After: file 26.1 -> 53.3 GiB (PLE fully resident + ~5 GiB other pages),
+  anon unchanged, memory.current 63.9 of 64 GiB steady.
+- Health 200 after; zero requests during the op.
+
+## Expectation (from the 10-28 curve: cap 26->36 took post-wash decode
+58-67 -> 162-169 tok/s; hot ceiling 171-181 unchanged)
+- Full PLE residency removes the residual eviction dips (the occasional
+  79 tok/s run) and the cold first-touch ~52 stretch after a wash.
+- Prefill unchanged (pipeline-bound PP3+PCIe hops, not RAM — 10-28 data).
+- Follow-up gate at a later idle window (NOT run today): post-wash decode
+  probe to confirm the dip class is gone.
+
+## Prod state
+Serving stack unchanged (fork dflash2-pool @ f010ce5415, pool 5.04x) —
+no new prod tag for an infra/memory change, per 10-28 precedent.

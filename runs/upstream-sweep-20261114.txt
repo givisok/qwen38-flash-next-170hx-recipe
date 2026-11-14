@@ -1,0 +1,55 @@
+# Sweep 2026-11-14 (~36h delta). Release check first: NO new build —
+# v0.33.0rc3 (11-02) is still the latest tag, no rc4/final. 136 commits in
+# window. One probe run (truncated tool-call), nothing ported.
+
+## Headlines
+1. #67590 [Spec Decode][Mamba] RecoverSSM for Qwen GDN (port of #58863
+   stack) — opened 11-14, draft. The ReplaySSM/RecoverSSM wave reaches OUR
+   model family (Qwen GDN, alongside Kimi K3 KDA). Flag `use_gdn_recoverssm`.
+   WATCH: if it merges, spec-decode verify under GDN changes shape → extends
+   the base-jump rebase scope; rebase verdict (NOT NOW) unchanged, wave is
+   still actively moving (#66040/#67198 open; #67553 CI split landed 11-13).
+2. #67594 truncated tool-call output as non-streaming content — PROBED on
+   our prod (patches/trunc-67594-probe.py): max_tokens cut inside the call
+   gives content='', tool_calls=[], finish=length, tokens burned. BUT:
+   (a) upstream's diff touches ONLY pythonic/llama4/olmo3 parsers — the
+   qwen3_xml lane is not theirs to fix; (b) our truncation is VISIBLE
+   (finish_reason=length), unlike the hermes/no-tools silent losses. SHELF:
+   client-side handling (length on a tool turn = retry with bigger budget);
+   not a port. Third member of the loss family, mildest.
+3. #67615 skip grammar injection for tool-less requests — semantic sibling
+   of our #67427, but the guided-decoding path; we run no structured output.
+   Skip. (Their writeup re-confirms the tool_choice None->"none"
+   normalization as the 65744 baseline.)
+4. #67547 fine-grained prefix-cache hits for sliding-window groups — GDN
+   prefix-cache family (our replay-depth fix is fork-local). Watch.
+5. #54625 cache-aware admission ordering MERGED (watch pair; #66361 aging
+   still open) — scheduler feature, rebase scope, no direct port (our
+   admission pain is modest).
+6. #62800 KV cache pages for hybrid models with draft layers — merged;
+   rebase note only.
+
+## Tracked
+- #66040 open (11-13), #67198 open (11-12) — wave alive.
+- #67356 (async+MTP padding crash) updated 11-14, still open.
+- #61779/#61952 (mixed-batch GDN CUDA graphs) updated 11-14, still open —
+  our port attempt lost solo -6..11%, revision trigger unchanged.
+- #62344 (SM80 QSA indexer launch) open, quiet since 11-11.
+- #66148 CLOSED without merge (QSA decode workspace) — dead, our
+  16-seq-cap geometry verdict stands.
+- #67164/#67200 (hermes) + #67427 (no-tools) open, no motion — our ports
+  stand. #67349 (PPMissingLayer others) open — rides the rebase.
+- #52244 open (11-12) — our fork port of its mechanics stands.
+
+## Peers
+- g4bwy alive again (11-13 push) but docs-only: results.md scrub + cert
+  protocol v2.1 (cmp.wiki merge), dev164 certified 11-11, bench.py stream
+  hashes. Nothing to take.
+- Search surface: jianrec/qwen38-flash-next-tp1 (11-14), sxuff/flare
+  (11-13, 16 stars), 89622180/Qwen3.8-Flash-Next-CMP-170HX-64GB (11-14),
+  moriyasujapan/2x170hx (11-11) — not assessed this pass; full peer pass
+  on request.
+
+## Verdict
+Nothing to pull. Rebase triggers: still NOT NOW (wave + no v0.33.0 final).
+Prod unchanged (prod-mtp4-ngram-hermes-notools-20261113); no tag.
