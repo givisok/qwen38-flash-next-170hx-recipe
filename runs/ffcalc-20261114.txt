@@ -1,0 +1,52 @@
+# 2026-11-14: ffcalc GA100 fuse scan — ALL 3 cards have 80 GiB / ~110 SM potential
+#
+# Tool: sayhellotojungle/cmp170hx-ffcalc @ b905bce (MIT, offline analyzer over
+# the kate-land GA100 VFI register map). READ-ONLY scan + burn-PLAN generator;
+# it never writes fuses. Plans + per-UUID dumps in runs/ffcalc-20261114/.
+#
+# Method on our host (kernel 7.0.14-28-z2p-pve, nvidia-open 615.71.09):
+# sysfs BAR0 mmap WORKS for these cards (author's 6.18-trim returned EINVAL),
+# so the ffprobe.ko module was unnecessary. userfs_probe.py (this dir)
+# re-reads the same 61 registers via ffcalc.capture.open_bar0 and emits
+# FFPROBE logs that the stock `python3 -m ffcalc scan` pipeline consumes
+# unchanged. Ran live against the serving engine — pure MMIO reads, engine
+# stayed at full util the whole time, spot check after (200-token reply +
+# zero errors in 40 min of logs) clean.
+#
+# Results (uuid tail | BDF | FB now->max | SM potential | plan | fingerprint):
+#   ec614963 0000:05:00.0  64->80 GiB  110 SM  11 records  fp 5d55da2331f339a0
+#   295351c7 0000:06:00.0  64->80 GiB  112 SM   9 records  fp f3d7d575e85b7d57
+#   2f74a495 0000:09:00.0  64->80 GiB  112 SM   9 records  fp 6185fc35c60f9dad
+#
+# Common silicon state (all 3):
+#   fbp_disable  cur 0x852 (4 of 12 FBP off = 64 GiB)  floor 0x840 -> 10/12
+#   fbio/fbpa/rop_l2 defective floor identical 0xc03000 on all 3
+#   gpc_disable  cur 0xa1 / 0x23 / 0x49 (plus TPC-level cuts = today's ~35 SM)
+#   per-GPC dead: ec61 GPC5 + GPC7(2 TPC); 2953 GPC5; 2f74 GPC3
+#   sys_pipe_disable cur 0xfe (only pipe 0 on). Target 0x0 on 2953/2f74
+#     (nothing defective); ec61 keeps 0x80 (pipe 7 defective).
+#   nvdec_disable 0x1f, status_nvjpg 0x1f -> video engines fused off;
+#     sys_pipe unlock (MIG/ECC/NVDEC) marked UNTESTED upstream.
+#   nvlink_disable cur 0x7 -> clearable per analyzer, but needs U11 bridge
+#     mod + ROM check bypass; our cards have no NVLink connectors - moot.
+#   secured_burn_feature_enable = 1 on all 3.
+#   PCIe gen3/4 disable bits clearable — but our x4 WIDTH cap is not a fuse
+#     matter, and PLX/X99 is gen3 anyway -> no benefit on this platform.
+#
+# Checks done: sim (replay) OK + verify (UUID/fingerprint/replay) OK on all
+# 3 plans; second probe run bit-identical (fingerprint stable within boot —
+# re-confirm after the next host reboot, expected unchanged per tool docs).
+#
+# What this is NOT: an unlock. The numbers are the ceiling from the defect
+# map. Turning them on = physically burning FF rows via voltage glitching
+# (kate-land method; the rp2040 glitch rig project) with the card pulled
+# from the server. Upstream unverified items that gate any burn:
+#   - FF-chain CRC auto-recompute by the controller: first burn must be
+#     `--only fbp_disable`, then cold boot and check CRC_STATUS == 0x55
+#     before burning the rest;
+#   - GEN3 bit1-vs-bit9 ambiguity (both cleared in the generated plans);
+#   - whether driver 615.71.09 accepts 10 FBP / 110 SM on devid 0x20c2.
+# Burning is physically irreversible; plans are per-UUID, re-verify against
+# a fresh collected/ capture immediately before any burn.
+#
+# Prod untouched: no config change, no reboot, no tag (serving stack same).

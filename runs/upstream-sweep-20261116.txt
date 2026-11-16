@@ -1,0 +1,75 @@
+# Sweep 2026-11-16 (~46h delta). Release check first: STILL no new build —
+# v0.33.0rc3 (11-02) remains the latest tag, no rc4/final. 95 commits in
+# window. Nothing ported; rebase-scope picture CHANGED (Headlines 1-2).
+
+## Headlines
+1. MERGED WAVE — five family PRs landed on main within ~36h (squash commits
+   in the window all reference their PR numbers):
+   - #66938 [Perf][Mamba] mid-block resume: 3 forward passes -> 1
+     (core: single_type_kv_cache_manager +8/-1, kv_cache_interface +2/-2;
+     +283 test lines). Aims at OUR partial-hit class: a request resuming
+     from a prefix hit in the middle of a Mamba block used to pay 3 passes,
+     now 1. Cheaper neighbor prefills = weaker miss-storm.
+   - #67717 [Bugfix][Mamba] don't cache blocks a mid-block prefill resume
+     ran past: _record_mid_block_states + _refine_block_mask; a block still
+     holding a resumed mid-block state never gets the full-block hash.
+     Same area as our 11-03 CoW crash and fork fix 1000662c31 (identity
+     validation + retraction + [partial-cow] tripwire, 0 fires since).
+     Upstream prevents publication; we retract after the fact. Complementary,
+     ours is stable in prod -> no port; rebase-scope diff item.
+   - #67725 [Perf][Qwen4Exp] MTP drafter pre-FC Gemma RMSNorms fused into
+     one Triton launch (+178/-12; touches nvidia/mtp.py, a file we already
+     patch for the W4A16 draft head). Claim: 12-77x on the kernel micro,
+     but only 0.07-0.17 ms/step (~0.2-0.45% ITL) end-to-end on B300 —
+     below our MTP acceptance-lottery noise band.
+   - #67728 [Perf][Qwen4Exp] drop the defensive QSA output zero_() (3 lines
+     in nvidia/qsa.py). Our QSA path is rewritten in the fork
+     (ops/qsa_indexer.py, chunked logits) -> near-N/A for us.
+   - #67733 [Perf][GDN] drop redundant prefill buffer init/copies of the
+     fused GDN spec-decode path (5 files incl. FLA layernorm_guard) —
+     small prefill gain, medium port cost onto our diverged files.
+   Verdict: nothing worth porting NOW — all five ride the next base jump
+   for free. #66938 is the only one aimed at a measured pain (true-miss
+   storm ~50% solo), but it builds on upstream manager structures that our
+   fork locally rewrote (replay-depth + CoW) — porting today = redoing that
+   mapping by hand for a gain we inherit anyway at rebase.
+2. UPSTREAM MAIN NOW CARRIES OUR LOCAL MECHANICS: #67717's patch context
+   shows the partial-tail / CoW / _checkpoints machinery already on main
+   (landed via the family; #52244 itself still open/stale, upd 11-12).
+   Consequence: at the next base jump our fork-local replay-depth + CoW
+   diffs SHRINK (upstream twins replace them) — during that rebase diff our
+   semantics against theirs (gates: replay depth 0 -> 8208/8231 landing
+   ceiling, 0 [partial-cow] in logs, needle, solo band).
+3. RecoverSSM #67590 (Qwen GDN, our family): draft, updated 11-16, still
+   open — watch; if merged, spec-decode verify under GDN changes shape and
+   extends the rebase scope. #67547 fine-grained sliding-window prefix
+   hits: open, updated 11-16 (watch; our replay fix stays fork-local).
+   #66040 / #67198 open — wave alive. #62344 (SM80 QSA launch) quiet.
+4. Mixed-batch #61779/#61952: updated, still NOT merged; our port attempt
+   verdict (lost solo 6-11%, reverted to branch port-gdn-61952) unchanged.
+
+## Peers
+- g4bwy: REAL motion after the docs-only pause — rebased onto upstream
+  e72e9cb18 ("dev498, cu132 era", 8 patches kept, #66063 conflict noted)
+  and certified dev506 under protocol v2.1: "cold median 204/4.66, hop
+  alive through transport". Signal worth recording: a base jump onto the
+  current wave IS livable on sibling hardware. Nothing to take (their
+  4-card FP8 lane stays untransplantable).
+- jianrec/qwen38-flash-next-tp1: added two-node TP2 deployment + bench
+  suite (cache_acceptance.py 669L, concurrent_hot_benchmark.py, phase1).
+  Not our topology (single host, PP3); scripts noted, no take.
+- 89622180/Qwen3.8-Flash-Next-CMP-170HX-64GB: CN docs round 4 (two HBM
+  pitfalls) — below our live state (64GB in prod, fuse path to 80 mapped).
+  moriyasujapan/2x170hx and sxuff/flare: 404 (renamed/deleted).
+- clee (10-11), AlexBrandes (recipe 11-11 / vllm fork 10-16), Morrowmake
+  (11-02), mannydelrio (10-16): quiet.
+- HF leoncca: nothing new since 10-25 — our Uncensored-AWQ-g32 remains the
+  newest artifact. HF hyudryu: author list now empty (account scrubbed?).
+
+## Verdict
+Nothing to pull. Rebase: still NOT NOW (no v0.33.0 final; wave active —
+#67590/#67547/#66040/#67198 all open, two updated today), but the next
+jump now FREELY BRINGS the mid-block-resume wave + Qwen4Exp/GDN micro-perf
+and shrinks our local diffs. Trigger set unchanged: v0.33.0 final + wave
+settling (first mixed-batch merge or RecoverSSM merge = immediate re-look).
+Prod unchanged (prod-mtp4-ngram-hermes-notools-20261113); no tag.
