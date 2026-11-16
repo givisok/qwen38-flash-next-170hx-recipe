@@ -73,3 +73,23 @@ jump now FREELY BRINGS the mid-block-resume wave + Qwen4Exp/GDN micro-perf
 and shrinks our local diffs. Trigger set unchanged: v0.33.0 final + wave
 settling (first mixed-batch merge or RecoverSSM merge = immediate re-look).
 Prod unchanged (prod-mtp4-ngram-hermes-notools-20261113); no tag.
+
+## ADDENDUM (same day, later): v0.34.0 tag EXISTS — the release check above
+## missed it; user caught it.
+- Tag v0.34.0 = 62d4bc3, tagged 11-16 04:27 UTC. At check time the
+  /releases API still lists v0.33.0rc3 as latest and the notes page fails
+  to render: the release object is mid-publish (v0.33.0 final is likewise
+  tag-only, no release object).
+- TRAP recorded: a release sweep must check /tags too — the tag is the
+  artifact; the release object can lag hours behind it.
+- Content check (compare v0.34.0...main): release branch is 608 commits
+  behind main (branch point ~11-04). It CONTAINS the partial-tail/CoW/
+  _checkpoints machinery (markers present in single_type_kv_cache_manager
+  .py at the tag = upstream twin of our replay-depth fork port), and does
+  NOT contain _mid_block_states (#67717) nor #66938 / #67725 / #67728 /
+  #67733 — the whole 11-15/16 merged family wave diverged from the tag.
+- Consequence: the wave rides to v0.35 (or a main-era jump like g4bwy's
+  e72e9cb18). Rebase trigger NOT fired by this release: jumping to v0.34.0
+  today = paying the full fork rebase for a partial payoff (CoW twin yes,
+  mid-block-resume perf no). Wait set unchanged: v0.35 carrying the wave,
+  or an explicit main-era decision; open-wave items as listed above.
