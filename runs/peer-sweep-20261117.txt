@@ -1,0 +1,71 @@
+# Peer + adjacent repo sweep 2026-11-17. vLLM peers: ALL quiet. The motion
+# is in the fuse lane — the toolchain we based our plan on grew a real-card
+# BURN capability overnight, and a validated glitch rig appeared.
+
+## vLLM peers (nothing to take)
+- g4bwy (11-14 dev506), AlexBrandes recipe (11-11) / vllm fork (10-16),
+  clee (10-11), mannydelrio (10-16), Morrowmake (11-02), jianrec (11-14),
+  89622180 (11-14): all quiet since last pass.
+- hyudryu is BACK with a NEW repo: Qwen3.8-Flash-Next-FP8-2xRTXPro6000
+  (created 11-17): TP2 Blackwell deployment + bench only (code C1 322
+  tok/s, prefill 15-16k). NOT our hardware; the draft-vocab/dynamic-ring
+  idea is NOT in it — our shelf entry unchanged.
+- Search surface is noise for us: P100/Strix Halo/MacBook/Arc B70/AI MAX/
+  DGX Sparks/5090 lanes, GGUF engines (Infernix, 8gkgcom q6-sm80).
+- HF: flood of new GGUF/abliterated/FP4 variants — none pass our "leoncca
+  uncensored AWQ only" rule; leoncca quiet since 10-25. turboderp exl3
+  repos touched (27B exl3 11-14) — EXL3 shelf unchanged (no vLLM engine).
+
+## FUSE LANE — material changes (11-15..11-17)
+1. sayhellotojungle/esp32-ga100vfi — created 11-17, Unlicense, v0.2.0.
+   ESP32-S3 voltage glitch + PERMANENT FF burn for CMP 170HX, CLOSED LOOP
+   ON A REAL CARD: 17 FF records appended, cold-boot bit-identical
+   readback. Port of dalzyu/pico-ga100vfi (RP2350 original; NOTE:
+   kprinssu/pico-ga100vfi from our 11-17 audit is now 404/deleted).
+   Key published mechanics (real-card verified): Goldilocks window via
+   PMBus NVVDD dip during fuse-array sampling on PEX_RST release;
+   DSOV=0 + CRC_STATUS=0x55 + SBFE=0 criteria; usable FF rows 304-320 on
+   their card; record = (data<<16)|(block<<6)|chain; full FUSECTRL/
+   FUSEADDR/FUSEDATA/FUSEWDATA map (0x820000..0x82008C incl.
+   WDATA_WR_SECURE unlock); CMD_READ=1 / CMD_PROGRAM=2 / SENSE_CTRL=3;
+   blank row reads 0x00000000 (not FF); FUSECTRL 0xBADFxxxx = controller
+   locked -> stop ALL BAR0 reads, full power cycle. 8 GB donor unlocked
+   toward 80 GiB / 108 SM / NVLink / Gen4 (geometry + Gen4 retrain =
+   driver-side follow-up stages). README explicitly suggests handing the
+   repo to an AI agent to run the campaign.
+   -> FOR US: this supersedes the no-license JosiahWhite/rp2040-glitch-tool
+   as the rig base (purpose-built, validated, public-domain) and replaces
+   the Pico+MOSFET-crowbar concept with ESP32-S3 + PMBus.
+2. sayhellotojungle/cmp170hx-ffcalc — now has burntool: `burntool status
+   --bdf` (read-only window check) and `burntool burn plan.json` =
+   assertion-based burn execution (docs/BURNING.md, "closed loop on real
+   card"). Plus `mergeff` (merge externally-read FF rows), gen now REFUSES
+   plans without FF rows (exit 2), ffscan.sh reads all 512 physical rows
+   via CMD_READ. New `--a100` switch adds MAGIC_BITS_D->0x00200000 for
+   cards slated for an A100 vBIOS flash (EXPERIMENTAL community guess,
+   unverified — only relevant if the 170HX driver path rejects 10-FBP
+   geometry and we fall back to A100 vBIOS).
+   -> Our host clone /root/cmp170hx-ffcalc is b905bce (11-14) = behind;
+   update BEFORE any bench work (analysis-only deltas, prod-safe dir).
+3. moriyasujapan/pwmvid-p8-fab (11-15, MIT): ready-to-order JLCPCB package
+   (gerbers+BOM+CPL+order notes) for kate-land's P8 PWMVID INTERCEPT
+   board (STM32G431 on the PWMVID rail, asks VRM for another voltage on
+   demand). Community export — NOT built/tested by anyone. This is the
+   alternative hardware knob if PMBus dips prove insufficient on our VRM.
+4. ggualerz/cmp170hx10g-to-80g (11-15): software-only tracks (MODS
+   Samsung profiles, IEEE1500, GSP-RM 610, Booter-535 ROP chain DID open
+   four PLMs and wrote target geometry) — still DEAD END (Booter times
+   out before GSP-RM). Confirms glitch+FF-append is the only proven route.
+5. Adjacent: 89622180/cmp170hx-check (read-only ceiling self-check, CN),
+   darkmaniac7/cmp-wiki-data (daily cmp.wiki JSON snapshots — cheap watch
+   source), donutello/nixos-cmp-tools, anoane/cmp-thermal (4x fan
+   controller) — noted, no action.
+
+## Verdict
+vLLM side: nothing to pull (consistent with today's upstream sweep).
+Fuse side: NO code pulled today either, but the campaign plan's hardware
+chapter is now obsolete — rewrite it around esp32-ga100vfi + ffcalc
+burntool when the bench prep starts. Next concrete steps when user says
+go: (1) git pull ffcalc on host (b905bce -> HEAD, analysis-only), (2) read
+esp32-ga100vfi docs/BURNING + hardware wiring vs our 05:00.0 donor card,
+(3) decide PMBus-first vs P8 board order. Prod untouched; no tag.
