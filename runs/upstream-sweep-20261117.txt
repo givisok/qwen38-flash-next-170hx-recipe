@@ -1,0 +1,36 @@
+# Sweep 2026-11-17 (morning delta). One overnight fact + two family merges.
+# Nothing ported.
+
+## Headlines
+1. v0.34.0 RELEASE OBJECT published overnight (2026-11-16 23:22 UTC, notes
+   47.5k chars). Content verdict from yesterday's addendum unchanged: family
+   wave NOT in it (release branch 608 commits behind main) — the wave rides
+   to v0.35.
+2. #65186 MERGED [Perf][GDN] Export Triton prefill checkpoints via
+   per-sequence buffers (+380/-20; qwen_gdn_linear_attn.py + FLA chunk /
+   chunk_delta_h kernels). Upstream-native version of what we grafted as
+   PLE prefill checkpoints (#61601 lineage, ours ON with effect ~0 at
+   match-unit 16). At rebase this likely SUPERSEDES our local export-after-
+   fold patch — fork diffs shrink further; diff semantics then (our gates:
+   PLE_PREFILL_CKPT footprint, pool unchanged).
+3. #67879 MERGED [Core][Bugfix] Honor prefill_schedule_interval for prefix
+   replay (+12/-6 scheduler): a prefix-cache-hit replay used to bypass the
+   interval cadence; now counted in the deferral decision. We run interval
+   OFF (our 11-03 A/B: deferred steps idle, lost hard) — semantics polish,
+   rebase-scope only.
+
+## Tracked
+- Mixed-batch #61779/#61952 updated 11-17 05:35 UTC — alive, NOT merged;
+  our port verdict (lost solo 6-11%) unchanged.
+- RecoverSSM #67590 no motion since 11-16 03:23. #67547/#66040/#67198/#52244
+  open. #67594 (truncated tool-call) updated 11-17, open — shelf stands.
+- #56088 404 via API (issue hidden/moved?); #56295 open unchanged.
+
+## Peers / HF
+- g4bwy (11-14), AlexBrandes (11-11), clee (10-11), Morrowmake (11-02),
+  jianrec (11-14): quiet. leoncca HF: nothing since 10-25.
+
+## Verdict
+Nothing to pull. Base-jump target remains v0.35 / main-era; nothing new
+changes the NOT NOW verdict (wave items still open). Prod unchanged
+(prod-mtp4-ngram-hermes-notools-20261113); no tag.
